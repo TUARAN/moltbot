@@ -360,3 +360,32 @@ export async function getCallHistoryFromStore(
   }
   return [];
 }
+
+export async function getStoredCallByIdOrProviderCallId(
+  storePath: string,
+  lookupId: string,
+): Promise<CallRecord | undefined> {
+  const normalizedLookupId = lookupId.trim();
+  if (!normalizedLookupId) {
+    return undefined;
+  }
+  const stores = tryCreateCallRecordStateStores(storePath);
+  if (!stores) {
+    return undefined;
+  }
+  try {
+    const calls = readCallRecordEvents(stores);
+    for (let index = calls.length - 1; index >= 0; index -= 1) {
+      const call = calls[index];
+      if (!call) {
+        continue;
+      }
+      if (call.callId === normalizedLookupId || call.providerCallId === normalizedLookupId) {
+        return call;
+      }
+    }
+  } catch (err) {
+    console.error("[voice-call] Failed to read SQLite call status:", err);
+  }
+  return undefined;
+}

@@ -17,6 +17,7 @@ import {
 } from "./manager/outbound.js";
 import {
   getCallHistoryFromStore,
+  getStoredCallByIdOrProviderCallId,
   loadActiveCallsFromStore,
   persistCallRecord,
 } from "./manager/store.js";
@@ -438,5 +439,16 @@ export class CallManager {
    */
   async getCallHistory(limit = 50): Promise<CallRecord[]> {
     return getCallHistoryFromStore(this.storePath, limit);
+  }
+
+  /**
+   * Resolve a call from active memory first, then persisted history.
+   */
+  async getCallStatusRecord(callId: string): Promise<CallRecord | undefined> {
+    const activeCall = this.getCall(callId) || this.getCallByProviderCallId(callId);
+    if (activeCall) {
+      return activeCall;
+    }
+    return getStoredCallByIdOrProviderCallId(this.storePath, callId);
   }
 }

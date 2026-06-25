@@ -16,6 +16,7 @@ import { CallRecordSchema } from "../types.js";
 import {
   flushPendingCallRecordWritesForTest,
   getCallHistoryFromStore,
+  getStoredCallByIdOrProviderCallId,
   loadActiveCallsFromStore,
   persistCallRecord,
 } from "./store.js";
@@ -76,6 +77,34 @@ describe("voice-call call record store", () => {
     expect(fs.existsSync(path.join(storePath, "calls.jsonl"))).toBe(false);
     const restored = loadActiveCallsFromStore(storePath);
     expect(restored.activeCalls.get("call-sqlite")?.providerCallId).toBe(call.providerCallId);
+  });
+
+  it("looks up the latest persisted call by call id or provider call id", async () => {
+    const storePath = createTestStorePath();
+    const first = CallRecordSchema.parse(
+      makePersistedCall({
+        callId: "call-status",
+        providerCallId: "provider-status",
+        state: "ringing",
+      }),
+    );
+    const second = CallRecordSchema.parse({
+      ...first,
+      state: "completed",
+      endedAt: Date.now(),
+      endReason: "completed",
+    });
+
+    persistCallRecord(storePath, first);
+    persistCallRecord(storePath, second);
+    await flushPendingCallRecordWritesForTest();
+
+    await expect(getStoredCallByIdOrProviderCallId(storePath, "call-status")).resolves.toMatchObject(
+      { callId: "call-status", state: "completed" },
+    );
+    await expect(
+      getStoredCallByIdOrProviderCallId(storePath, "provider-status"),
+    ).resolves.toMatchObject({ callId: "call-status", state: "completed" });
   });
 
   it("does not read the JSONL fallback when SQLite state cannot open", () => {

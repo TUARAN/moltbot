@@ -625,7 +625,7 @@ export default definePluginEntry({
             respond(true, { found: true, calls: rt.manager.getActiveCalls() });
             return;
           }
-          const call = rt.manager.getCall(raw) || rt.manager.getCallByProviderCallId(raw);
+          const call = await rt.manager.getCallStatusRecord(raw);
           if (!call) {
             respond(true, { found: false });
             return;
@@ -762,8 +762,7 @@ export default definePluginEntry({
                 if (!callId) {
                   throw new Error("callId required");
                 }
-                const call =
-                  rt.manager.getCall(callId) || rt.manager.getCallByProviderCallId(callId);
+                const call = await rt.manager.getCallStatusRecord(callId);
                 return json(call ? { found: true, call } : { found: false });
               }
             }
@@ -775,7 +774,7 @@ export default definePluginEntry({
             if (!sid) {
               throw new Error("sid required for status");
             }
-            const call = rt.manager.getCall(sid) || rt.manager.getCallByProviderCallId(sid);
+            const call = await rt.manager.getCallStatusRecord(sid);
             return json(call ? { found: true, call } : { found: false });
           }
 

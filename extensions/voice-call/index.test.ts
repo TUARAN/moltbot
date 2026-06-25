@@ -85,6 +85,7 @@ function createRuntimeStub(callId = "call-1"): VoiceCallRuntime {
       endCall: vi.fn(async () => ({ success: true })),
       getCall: vi.fn((id: string) => (id === callId ? call : undefined)),
       getCallByProviderCallId: vi.fn(() => undefined),
+      getCallStatusRecord: vi.fn(async (id: string) => (id === callId ? call : undefined)),
       getActiveCalls: vi.fn(() => [call]),
       getCallHistory: vi.fn(async () => []),
     } as unknown as VoiceCallRuntime["manager"],
@@ -489,6 +490,28 @@ describe("voice-call plugin", () => {
     expect(payload?.found).toBe(true);
   });
 
+  it("falls back to persisted status records for gateway lookups", async () => {
+    runtimeStub.manager.getCallStatusRecord = vi.fn(async () =>
+      createCallRecord({ callId: "call-stored", state: "completed" }),
+    );
+    const { methods } = setup({ provider: "mock" });
+    const handler = methods.get("voicecall.status") as
+      | ((ctx: {
+          params: Record<string, unknown>;
+          respond: ReturnType<typeof vi.fn>;
+        }) => Promise<void>)
+      | undefined;
+    const respond = vi.fn();
+
+    await handler?.({ params: { callId: "provider-call-1" }, respond });
+
+    expect(runtimeStub.manager.getCallStatusRecord).toHaveBeenCalledWith("provider-call-1");
+    expect(firstRespondCall(respond)).toEqual([
+      true,
+      { found: true, call: expect.objectContaining({ callId: "call-stored", state: "completed" }) },
+    ]);
+  });
+
   it("sends DTMF via voicecall.dtmf", async () => {
     const { methods } = setup({ provider: "mock" });
     const handler = methods.get("voicecall.dtmf") as
@@ -660,6 +683,25 @@ describe("voice-call plugin", () => {
     expect(result.details.found).toBe(true);
   });
 
+  it("tool get_status returns persisted status payload when active maps miss", async () => {
+    runtimeStub.manager.getCallStatusRecord = vi.fn(async () =>
+      createCallRecord({ callId: "call-stored", state: "completed" }),
+    );
+    const { tools } = setup({ provider: "mock" });
+    const tool = tools[0] as {
+      execute: (id: string, params: unknown) => Promise<unknown>;
+    };
+    const result = (await tool.execute("id", {
+      action: "get_status",
+      callId: "provider-call-1",
+    })) as { details: { found?: boolean; call?: { callId?: string; state?: string } } };
+    expect(runtimeStub.manager.getCallStatusRecord).toHaveBeenCalledWith("provider-call-1");
+    expect(result.details).toMatchObject({
+      found: true,
+      call: { callId: "call-stored", state: "completed" },
+    });
+  });
+
   it("tool send_dtmf returns json payload", async () => {
     const { tools } = setup({ provider: "mock" });
     const tool = tools[0] as {
@@ -683,6 +725,24 @@ describe("voice-call plugin", () => {
       details: { error?: unknown };
     };
     expect(String(result.details.error)).toContain("sid required");
+  });
+
+  it("legacy tool status returns persisted records when active maps miss", async () => {
+    runtimeStub.manager.getCallStatusRecord = vi.fn(async () =>
+      createCallRecord({ callId: "call-stored", state: "completed" }),
+    );
+    const { tools } = setup({ provider: "mock" });
+    const tool = tools[0] as {
+      execute: (id: string, params: unknown) => Promise<unknown>;
+    };
+    const result = (await tool.execute("id", { mode: "status", sid: "provider-call-1" })) as {
+      details: { found?: boolean; call?: { callId?: string; state?: string } };
+    };
+    expect(runtimeStub.manager.getCallStatusRecord).toHaveBeenCalledWith("provider-call-1");
+    expect(result.details).toMatchObject({
+      found: true,
+      call: { callId: "call-stored", state: "completed" },
+    });
   });
 
   it("CLI rejects invalid numeric options", async () => {
@@ -1048,6 +1108,26 @@ describe("voice-call plugin", () => {
       expect(createVoiceCallRuntime).not.toHaveBeenCalled();
       expect(parsed.calls).toHaveLength(1);
       expect(parsed.calls?.[0]?.callId).toBe("gateway-call");
+    } finally {
+      stdout.restore();
+    }
+  });
+
+  it("CLI status falls back to persisted call status when the gateway is unavailable", async () => {
+    runtimeStub.manager.getCallStatusRecord = vi.fn(async () =>
+      createCallRecord({ callId: "call-stored", state: "completed" }),
+    );
+    const program = new Command();
+    const stdout = captureStdout();
+    await registerVoiceCallCli(program);
+
+    try {
+      await program.parseAsync(["voicecall", "status", "--call-id", "provider-call-1", "--json"], {
+        from: "user",
+      });
+      const parsed = JSON.parse(stdout.output()) as { callId?: string; state?: string };
+      expect(parsed).toMatchObject({ callId: "call-stored", state: "completed" });
+      expect(runtimeStub.manager.getCallStatusRecord).toHaveBeenCalledWith("provider-call-1");
     } finally {
       stdout.restore();
     }
