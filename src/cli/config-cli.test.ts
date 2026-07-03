@@ -862,6 +862,70 @@ describe("config cli", () => {
       expectErrorIncludes("Refusing to replace agents.defaults.models");
     });
 
+    it("rejects replacing channels when the payload would drop configured entries", async () => {
+      const resolved: OpenClawConfig = {
+        channels: {
+          discord: {
+            enabled: true,
+            dmPolicy: "disabled",
+          },
+          telegram: {
+            enabled: true,
+            dmPolicy: "allowlist",
+          },
+        },
+      };
+      setSnapshot(resolved, resolved);
+
+      await expect(
+        runConfigCommand([
+          "config",
+          "set",
+          "channels",
+          '{"discord":{"enabled":false}}',
+          "--strict-json",
+        ]),
+      ).rejects.toThrow("__exit__:1");
+
+      expect(mockWriteConfigFile).not.toHaveBeenCalled();
+      expectErrorIncludes("Refusing to replace channels");
+      expectErrorIncludes("telegram");
+    });
+
+    it("merges channels with --merge instead of clobbering sibling entries", async () => {
+      const resolved: OpenClawConfig = {
+        channels: {
+          discord: {
+            enabled: true,
+            dmPolicy: "disabled",
+          },
+        },
+      };
+      setSnapshot(resolved, resolved);
+
+      await runConfigCommand([
+        "config",
+        "set",
+        "channels",
+        '{"telegram":{"enabled":true,"dmPolicy":"allowlist"}}',
+        "--strict-json",
+        "--merge",
+      ]);
+
+      expect(mockWriteConfigFile).toHaveBeenCalledTimes(1);
+      const written = firstWrittenConfig();
+      expect(written.channels).toEqual({
+        discord: {
+          enabled: true,
+          dmPolicy: "disabled",
+        },
+        telegram: {
+          enabled: true,
+          dmPolicy: "allowlist",
+        },
+      });
+    });
+
     it("merges protected model map values with --merge", async () => {
       const resolved: OpenClawConfig = {
         agents: {
@@ -2265,10 +2329,7 @@ describe("config cli", () => {
       const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-config-plugin-provider-"));
       try {
         writeSecurePluginEntrypoint(path.join(rootDir, "index.js"), "export default {};\n");
-        writeSecurePluginEntrypoint(
-          path.join(rootDir, "resolve.mjs"),
-          "process.stdin.resume();\n",
-        );
+        writeSecurePluginEntrypoint(path.join(rootDir, "resolve.mjs"), "process.stdin.resume();\n");
         const resolved = {
           secrets: {
             providers: {},

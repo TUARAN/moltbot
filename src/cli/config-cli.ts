@@ -804,6 +804,9 @@ function isProviderModelListPath(path: PathSegment[]): boolean {
 }
 
 function isProtectedMapReplacementPath(path: PathSegment[]): boolean {
+  if (path.join(".") === "channels") {
+    return true;
+  }
   if (path.join(".") === "agents.defaults.models") {
     return true;
   }

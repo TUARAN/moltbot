@@ -100,7 +100,7 @@ openclaw config set channels.whatsapp.groups '["*"]' --strict-json
 `config get <path> --json` prints the raw value as JSON instead of terminal-formatted text.
 
 <Note>
-Object assignment replaces the target path by default. Protected map/list paths that commonly hold user-added entries, such as `agents.defaults.models`, `models.providers`, `models.providers.<id>.models`, `plugins.entries`, and `auth.profiles`, refuse replacements that would remove existing entries unless you pass `--replace`.
+Object assignment replaces the target path by default. Protected map/list paths that commonly hold user-added entries, such as `channels`, `agents.defaults.models`, `models.providers`, `models.providers.<id>.models`, `plugins.entries`, and `auth.profiles`, refuse replacements that would remove existing entries unless you pass `--replace`.
 </Note>
 
 Use `--merge` when adding entries to those maps:
