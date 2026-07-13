@@ -1,5 +1,6 @@
 // Integrates with the local Tailscale CLI for tailnet setup and sharing.
 import { existsSync } from "node:fs";
+import { setTimeout as delay } from "node:timers/promises";
 import {
   asDateTimestampMs,
   resolveExpiresAtMsFromDurationMs,
@@ -21,6 +22,33 @@ function parsePossiblyNoisyJsonObject(stdout: string): Record<string, unknown> {
     return JSON.parse(trimmed.slice(start, end + 1)) as Record<string, unknown>;
   }
   return JSON.parse(trimmed) as Record<string, unknown>;
+}
+
+const TAILSCALE_STATUS_ATTEMPTS = 3;
+const TAILSCALE_STATUS_RETRY_DELAY_MS = 500;
+
+async function readTailscaleStatusJson(
+  candidate: string,
+  exec: typeof runExec,
+): Promise<Record<string, unknown>> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= TAILSCALE_STATUS_ATTEMPTS; attempt += 1) {
+    try {
+      const { stdout } = await exec(candidate, ["status", "--json"], {
+        timeoutMs: 5000,
+        maxBuffer: 400_000,
+      });
+      return stdout ? parsePossiblyNoisyJsonObject(stdout) : {};
+    } catch (error) {
+      lastError = error;
+      if (attempt < TAILSCALE_STATUS_ATTEMPTS) {
+        // Serve startup can briefly race daemon status. Retry the same detected binary so
+        // binary fallback does not hide the transient failure or change installations.
+        await delay(TAILSCALE_STATUS_RETRY_DELAY_MS);
+      }
+    }
+  }
+  throw toErrorObject(lastError, "Non-Error thrown");
 }
 
 /**
@@ -130,11 +158,7 @@ export async function getTailnetHostname(exec: typeof runExec = runExec, detecte
       continue;
     }
     try {
-      const { stdout } = await exec(candidate, ["status", "--json"], {
-        timeoutMs: 5000,
-        maxBuffer: 400_000,
-      });
-      const parsed = stdout ? parsePossiblyNoisyJsonObject(stdout) : {};
+      const parsed = await readTailscaleStatusJson(candidate, exec);
       const self =
         typeof parsed.Self === "object" && parsed.Self !== null
           ? (parsed.Self as Record<string, unknown>)
