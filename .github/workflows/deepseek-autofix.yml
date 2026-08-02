@@ -1,0 +1,196 @@
+name: DeepSeek Fork Autofix
+
+on:
+  schedule:
+    # Asia/Shanghai: 03:17, 08:05, 12:53, 17:41, 22:29 (4h48m apart).
+    - cron: "17 19 * * *"
+    - cron: "5 0 * * *"
+    - cron: "53 4 * * *"
+    - cron: "41 9 * * *"
+    - cron: "29 14 * * *"
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish validated fork issues and pull requests
+        required: false
+        default: true
+        type: boolean
+
+permissions: {}
+
+concurrency:
+  group: deepseek-fork-autofix-${{ github.repository }}
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  sync-upstream:
+    if: >-
+      github.repository == 'TUARAN/moltbot' &&
+      (github.event_name == 'schedule' || inputs.publish == true)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Checkout trusted fork main
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Create fork-scoped app token
+        id: app-token
+        if: vars.DEEPSEEK_AUTOFIX_APP_ID != ''
+        continue-on-error: true
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.DEEPSEEK_AUTOFIX_APP_ID }}
+          private-key: ${{ secrets.DEEPSEEK_AUTOFIX_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
+
+      - name: Create or update upstream sync PR
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+        run: node scripts/deepseek-autofix.mjs sync
+
+  repair:
+    if: github.repository == 'TUARAN/moltbot'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    steps:
+      - name: Checkout trusted fork main
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Isolate OpenClaw state from the workspace
+        run: |
+          # zizmor: ignore[github-env] RUNNER_TEMP is a trusted GitHub runner path.
+          echo "OPENCLAW_STATE_DIR=$RUNNER_TEMP/deepseek-autofix-state" >> "$GITHUB_ENV"
+          echo "OPENCLAW_CONFIG_PATH=$RUNNER_TEMP/deepseek-autofix-state/openclaw.json" >> "$GITHUB_ENV"
+
+      - name: Setup Node and dependencies
+        uses: ./.github/actions/setup-node-env
+        with:
+          install-bun: false
+          install-deps: true
+          save-actions-cache: false
+
+      - name: Snapshot trusted automation policy
+        run: |
+          trusted_root="$RUNNER_TEMP/deepseek-autofix-trusted"
+          mkdir -p "$trusted_root/scripts/deepseek-autofix" "$trusted_root/.github/deepseek-autofix"
+          cp scripts/deepseek-autofix.mjs "$trusted_root/scripts/deepseek-autofix.mjs"
+          cp scripts/deepseek-autofix/contracts.mjs "$trusted_root/scripts/deepseek-autofix/contracts.mjs"
+          cp .github/deepseek-autofix/agent-prompt.md "$trusted_root/.github/deepseek-autofix/agent-prompt.md"
+          cp .github/deepseek-autofix/review-prompt.md "$trusted_root/.github/deepseek-autofix/review-prompt.md"
+          chmod -R a-w "$trusted_root"
+          # zizmor: ignore[github-env] RUNNER_TEMP is a trusted GitHub runner path.
+          echo "DEEPSEEK_AUTOFIX_TRUSTED_ROOT=$trusted_root" >> "$GITHUB_ENV"
+
+      - name: Prepare read-only candidate context
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node "$DEEPSEEK_AUTOFIX_TRUSTED_ROOT/scripts/deepseek-autofix.mjs" prepare
+
+      - name: Build isolated tool sandbox
+        run: |
+          scripts/sandbox-setup.sh
+          docker build \
+            --tag deepseek-autofix-verify:node24 \
+            --file .github/deepseek-autofix/Dockerfile.verify \
+            .
+
+      - name: Configure repair sandbox
+        run: node "$DEEPSEEK_AUTOFIX_TRUSTED_ROOT/scripts/deepseek-autofix.mjs" configure rw
+
+      - name: Run DeepSeek V4 Pro repair worker
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+        run: node "$DEEPSEEK_AUTOFIX_TRUSTED_ROOT/scripts/deepseek-autofix.mjs" agent
+
+      - name: Enforce deterministic patch policy
+        run: node "$DEEPSEEK_AUTOFIX_TRUSTED_ROOT/scripts/deepseek-autofix.mjs" validate
+
+      - name: Configure read-only review sandbox
+        run: node "$DEEPSEEK_AUTOFIX_TRUSTED_ROOT/scripts/deepseek-autofix.mjs" configure ro
+
+      - name: Run independent DeepSeek V4 Pro review
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+        run: node "$DEEPSEEK_AUTOFIX_TRUSTED_ROOT/scripts/deepseek-autofix.mjs" review
+
+      - name: Run focused verification
+        run: node "$DEEPSEEK_AUTOFIX_TRUSTED_ROOT/scripts/deepseek-autofix.mjs" verify
+
+      - name: Package reviewed result
+        run: node "$DEEPSEEK_AUTOFIX_TRUSTED_ROOT/scripts/deepseek-autofix.mjs" package
+
+      - name: Upload reviewed result
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: deepseek-autofix-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .artifacts/deepseek-autofix
+          if-no-files-found: warn
+          retention-days: 14
+
+  publish:
+    needs: repair
+    if: >-
+      github.repository == 'TUARAN/moltbot' &&
+      needs.repair.result == 'success' &&
+      (github.event_name == 'schedule' || inputs.publish == true)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Checkout exact reviewed base
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download reviewed result
+        uses: actions/download-artifact@v8
+        with:
+          name: deepseek-autofix-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .artifacts/deepseek-autofix
+
+      - name: Create fork-scoped app token
+        id: app-token
+        if: vars.DEEPSEEK_AUTOFIX_APP_ID != ''
+        continue-on-error: true
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.DEEPSEEK_AUTOFIX_APP_ID }}
+          private-key: ${{ secrets.DEEPSEEK_AUTOFIX_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
+
+      - name: Publish fork issue or pull request
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+        run: node scripts/deepseek-autofix.mjs publish
