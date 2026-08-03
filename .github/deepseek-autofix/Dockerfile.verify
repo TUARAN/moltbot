@@ -1,7 +1,11 @@
 FROM node:24-bookworm-slim@sha256:242549cd46785b480c832479a730f4f2a20865d61ea2e404fdb2a5c3d3b73ecf
 
+ENV COREPACK_HOME=/opt/corepack
+
 RUN corepack enable \
-  && corepack prepare pnpm@11.2.2 --activate
+  && corepack prepare pnpm@11.2.2 --activate \
+  && pnpm --version \
+  && chmod -R a+rX "$COREPACK_HOME"
 
 USER node
 WORKDIR /workspace
