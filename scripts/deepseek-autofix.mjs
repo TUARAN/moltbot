@@ -246,6 +246,17 @@ function invokeAgent(message, agentId) {
   return runAgentTurn(buildAgentBootstrap(inputFile), agentId);
 }
 
+function agentNeedsContinuation() {
+  if (!existsSync(RESULT_PATH)) {
+    return true;
+  }
+  const result = parseAgentResult(readJson(RESULT_PATH));
+  if (stagedFiles().length > 0) {
+    return true;
+  }
+  return result.outcome !== "fix-ready" && changedFiles().length > 0;
+}
+
 function runAgent() {
   if (!existsSync(CONTEXT_PATH)) {
     fail(`missing context: ${CONTEXT_PATH}`);
@@ -256,8 +267,10 @@ function runAgent() {
   const message = `${prompt}\n\n<untrusted_context_json>\n${context}\n</untrusted_context_json>`;
   let response = invokeAgent(message, "main");
   writeJson(path.join(ARTIFACT_DIR, "agent-response-1.json"), response);
-  for (let turn = 2; turn <= MAX_AGENT_TURNS && !existsSync(RESULT_PATH); turn += 1) {
-    console.log(`DeepSeek agent stopped before writing its result; continuing turn ${turn}.`);
+  for (let turn = 2; turn <= MAX_AGENT_TURNS && agentNeedsContinuation(); turn += 1) {
+    console.log(
+      `DeepSeek agent has not produced a policy-complete result; continuing turn ${turn}.`,
+    );
     response = runAgentTurn(buildAgentContinuation(path.relative(ROOT, RESULT_PATH)), "main");
     writeJson(path.join(ARTIFACT_DIR, `agent-response-${turn}.json`), response);
   }
@@ -294,6 +307,20 @@ function changedFiles() {
     .filter(Boolean);
 }
 
+function stagedFiles() {
+  return run("git", [
+    "diff",
+    "--cached",
+    "--name-only",
+    "--",
+    ".",
+    ":(exclude).artifacts/**",
+    ":(exclude).codex-worktrees/**",
+  ])
+    .split("\n")
+    .filter(Boolean);
+}
+
 function diffNumstat() {
   return run("git", [
     "diff",
@@ -316,6 +343,10 @@ function diffNumstat() {
 
 function validate() {
   const result = parseAgentResult(readJson(RESULT_PATH));
+  const staged = stagedFiles();
+  if (staged.length > 0) {
+    fail(`agent must leave the Git index clean: ${staged.join(", ")}`);
+  }
   const modeSummary = run("git", [
     "diff",
     "--summary",

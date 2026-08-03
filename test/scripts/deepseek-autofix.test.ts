@@ -1,3 +1,7 @@
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   assertAllowedModeSummary,
@@ -31,6 +35,60 @@ function fixResult(overrides: Record<string, unknown> = {}) {
 }
 
 describe("DeepSeek autofix contracts", () => {
+  it.each([
+    ["staged and present in the worktree", "staged change\n"],
+    ["staged but restored in the worktree", "original\n"],
+  ])("rejects an index edit %s for a no-action result", (_case, worktreeContents) => {
+    const repo = mkdtempSync(path.join(tmpdir(), "deepseek-autofix-staged-"));
+    const runGit = (...args: string[]) =>
+      spawnSync("git", args, { cwd: repo, encoding: "utf8", stdio: "pipe" });
+    try {
+      expect(runGit("init", "--quiet").status).toBe(0);
+      writeFileSync(path.join(repo, "tracked.txt"), "original\n");
+      expect(runGit("add", "tracked.txt").status).toBe(0);
+      expect(
+        runGit(
+          "-c",
+          "user.name=DeepSeek Autofix Test",
+          "-c",
+          "user.email=autofix-test@example.invalid",
+          "commit",
+          "--quiet",
+          "-m",
+          "baseline",
+        ).status,
+      ).toBe(0);
+
+      mkdirSync(path.join(repo, ".artifacts", "deepseek-autofix"), { recursive: true });
+      writeFileSync(
+        path.join(repo, ".artifacts", "deepseek-autofix", "result.json"),
+        `${JSON.stringify({
+          outcome: "no-action",
+          title: "",
+          summary: "",
+          rootCause: "",
+          issueBody: "",
+          prBody: "",
+          testFiles: [],
+          sourceUrls: [],
+        })}\n`,
+      );
+      writeFileSync(path.join(repo, "tracked.txt"), "staged change\n");
+      expect(runGit("add", "tracked.txt").status).toBe(0);
+      writeFileSync(path.join(repo, "tracked.txt"), worktreeContents);
+
+      const validation = spawnSync(
+        process.execPath,
+        [path.join(process.cwd(), "scripts", "deepseek-autofix.mjs"), "validate"],
+        { cwd: repo, encoding: "utf8", stdio: "pipe" },
+      );
+      expect(validation.status).toBe(1);
+      expect(validation.stderr).toContain("agent must leave the Git index clean");
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
   it("accepts a bounded production fix with a focused test", () => {
     const result = fixResult();
     expect(
@@ -144,6 +202,7 @@ describe("DeepSeek autofix contracts", () => {
     expect(continuation).toContain("same session");
     expect(continuation).toContain("result.json");
     expect(continuation).toContain("no-action");
+    expect(continuation).toContain("clean workspace");
   });
 
   it("rejects executable mode changes on new and existing files", () => {
