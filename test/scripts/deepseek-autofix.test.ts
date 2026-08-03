@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   assertAllowedModeSummary,
   branchSlug,
+  buildAgentBootstrap,
   buildIssueFingerprint,
   extractAgentText,
   extractJsonObject,
@@ -126,6 +127,14 @@ describe("DeepSeek autofix contracts", () => {
 
   it("neutralizes mentions and control whitespace in published titles", () => {
     expect(sanitizePublishedTitle("Fix  @openclaw/team\nnow")).toBe("Fix @\u200bopenclaw/team now");
+  });
+
+  it("keeps full agent input out of the process argument list", () => {
+    const largeInput = "x".repeat(256_000);
+    const bootstrap = buildAgentBootstrap(".artifacts/deepseek-autofix/main-input.md");
+    expect(Buffer.byteLength(bootstrap)).toBeLessThan(1_024);
+    expect(bootstrap).not.toContain(largeInput);
+    expect(bootstrap).toContain("main-input.md");
   });
 
   it("rejects executable mode changes on new and existing files", () => {

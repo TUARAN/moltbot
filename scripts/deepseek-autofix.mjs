@@ -9,6 +9,7 @@ import {
   UPSTREAM_SYNC_MARKER,
   assertAllowedModeSummary,
   branchSlug,
+  buildAgentBootstrap,
   buildIssueFingerprint,
   extractAgentText,
   extractJsonObject,
@@ -213,6 +214,8 @@ function configure(access) {
 }
 
 function invokeAgent(message, agentId) {
+  const inputFile = `.artifacts/deepseek-autofix/${agentId}-input.md`;
+  writeFileSync(path.join(ROOT, inputFile), `${message}\n`, "utf8");
   const output = run("pnpm", [
     "openclaw",
     "agent",
@@ -227,7 +230,7 @@ function invokeAgent(message, agentId) {
     "2700",
     "--json",
     "--message",
-    message,
+    buildAgentBootstrap(inputFile),
   ]);
   return JSON.parse(output);
 }
