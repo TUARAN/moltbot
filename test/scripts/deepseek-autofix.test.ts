@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  AUTOFIX_MODEL_POLICY,
   assertAllowedModeSummary,
   branchSlug,
   buildAgentBootstrap,
@@ -35,6 +36,13 @@ function fixResult(overrides: Record<string, unknown> = {}) {
 }
 
 describe("DeepSeek autofix contracts", () => {
+  it("prefers OpenCode Go and falls back to the official DeepSeek API", () => {
+    expect(AUTOFIX_MODEL_POLICY).toEqual({
+      primary: "opencode-go/deepseek-v4-pro",
+      fallbacks: ["deepseek/deepseek-v4-pro"],
+    });
+  });
+
   it.each([
     ["staged and present in the worktree", "staged change\n"],
     ["staged but restored in the worktree", "original\n"],

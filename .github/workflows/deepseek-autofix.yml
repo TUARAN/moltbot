@@ -90,17 +90,27 @@ jobs:
           install-deps: true
           save-actions-cache: false
 
-      - name: Snapshot trusted automation policy
+      - name: Prepare immutable OpenClaw runtime and automation policy
         run: |
           trusted_root="$RUNNER_TEMP/deepseek-autofix-trusted"
-          mkdir -p "$trusted_root/scripts/deepseek-autofix" "$trusted_root/.github/deepseek-autofix"
-          cp scripts/deepseek-autofix.mjs "$trusted_root/scripts/deepseek-autofix.mjs"
-          cp scripts/deepseek-autofix/contracts.mjs "$trusted_root/scripts/deepseek-autofix/contracts.mjs"
-          cp .github/deepseek-autofix/agent-prompt.md "$trusted_root/.github/deepseek-autofix/agent-prompt.md"
-          cp .github/deepseek-autofix/review-prompt.md "$trusted_root/.github/deepseek-autofix/review-prompt.md"
+          git worktree add --detach "$trusted_root" "$GITHUB_SHA"
+          corepack pnpm --dir "$trusted_root" install \
+            --frozen-lockfile \
+            --offline \
+            --package-import-method=copy
+          dependency_probe=$(find node_modules/.pnpm -type f -name '*.js' -print -quit)
+          dependency_relative=${dependency_probe#node_modules/.pnpm/}
+          test -n "$dependency_relative"
+          test -f "$trusted_root/node_modules/.pnpm/$dependency_relative"
+          test "$(stat -c '%d:%i' "$dependency_probe")" != \
+            "$(stat -c '%d:%i' "$trusted_root/node_modules/.pnpm/$dependency_relative")"
+          corepack pnpm --dir "$trusted_root" build
           chmod -R a-w "$trusted_root"
+          node "$trusted_root/openclaw.mjs" models list --all --provider deepseek --json > /dev/null
           # zizmor: ignore[github-env] RUNNER_TEMP is a trusted GitHub runner path.
           echo "DEEPSEEK_AUTOFIX_TRUSTED_ROOT=$trusted_root" >> "$GITHUB_ENV"
+          # zizmor: ignore[github-env] RUNNER_TEMP is a trusted GitHub runner path.
+          echo "DEEPSEEK_AUTOFIX_RUNTIME_ROOT=$trusted_root" >> "$GITHUB_ENV"
 
       - name: Prepare read-only candidate context
         env:
@@ -118,9 +128,10 @@ jobs:
       - name: Configure repair sandbox
         run: node "$DEEPSEEK_AUTOFIX_TRUSTED_ROOT/scripts/deepseek-autofix.mjs" configure rw
 
-      - name: Run DeepSeek V4 Pro repair worker
+      - name: Run DeepSeek V4 Pro repair worker with provider fallback
         env:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: node "$DEEPSEEK_AUTOFIX_TRUSTED_ROOT/scripts/deepseek-autofix.mjs" agent
 
       - name: Enforce deterministic patch policy
@@ -129,9 +140,10 @@ jobs:
       - name: Configure read-only review sandbox
         run: node "$DEEPSEEK_AUTOFIX_TRUSTED_ROOT/scripts/deepseek-autofix.mjs" configure ro
 
-      - name: Run independent DeepSeek V4 Pro review
+      - name: Run independent DeepSeek V4 Pro review with provider fallback
         env:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: node "$DEEPSEEK_AUTOFIX_TRUSTED_ROOT/scripts/deepseek-autofix.mjs" review
 
       - name: Run focused verification
