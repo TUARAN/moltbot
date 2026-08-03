@@ -74,7 +74,7 @@ jobs:
       - name: Checkout trusted fork main
         uses: actions/checkout@v6
         with:
-          fetch-depth: 0
+          fetch-depth: 1
           persist-credentials: false
 
       - name: Isolate OpenClaw state from the workspace
@@ -98,12 +98,15 @@ jobs:
             --frozen-lockfile \
             --offline \
             --package-import-method=copy
-          dependency_probe=$(find node_modules/.pnpm -type f -name '*.js' -print -quit)
-          dependency_relative=${dependency_probe#node_modules/.pnpm/}
-          test -n "$dependency_relative"
-          test -f "$trusted_root/node_modules/.pnpm/$dependency_relative"
-          test "$(stat -c '%d:%i' "$dependency_probe")" != \
-            "$(stat -c '%d:%i' "$trusted_root/node_modules/.pnpm/$dependency_relative")"
+          candidate_dependency=node_modules/tsx/package.json
+          trusted_dependency="$trusted_root/node_modules/tsx/package.json"
+          test -f "$candidate_dependency"
+          test -f "$trusted_dependency"
+          if test "$(stat -c '%d:%i' "$candidate_dependency")" = \
+            "$(stat -c '%d:%i' "$trusted_dependency")"; then
+            echo "Trusted runtime dependency unexpectedly shares an inode with the repair workspace." >&2
+            exit 1
+          fi
           corepack pnpm --dir "$trusted_root" build
           chmod -R a-w "$trusted_root"
           node "$trusted_root/openclaw.mjs" models list --all --provider deepseek --json > /dev/null
