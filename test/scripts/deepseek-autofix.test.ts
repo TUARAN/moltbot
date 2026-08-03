@@ -3,6 +3,7 @@ import {
   assertAllowedModeSummary,
   branchSlug,
   buildAgentBootstrap,
+  buildAgentContinuation,
   buildIssueFingerprint,
   extractAgentText,
   extractJsonObject,
@@ -135,6 +136,14 @@ describe("DeepSeek autofix contracts", () => {
     expect(Buffer.byteLength(bootstrap)).toBeLessThan(1_024);
     expect(bootstrap).not.toContain(largeInput);
     expect(bootstrap).toContain("main-input.md");
+  });
+
+  it("continues an unfinished agent turn with a bounded result-file reminder", () => {
+    const continuation = buildAgentContinuation(".artifacts/deepseek-autofix/result.json");
+    expect(Buffer.byteLength(continuation)).toBeLessThan(1_024);
+    expect(continuation).toContain("same session");
+    expect(continuation).toContain("result.json");
+    expect(continuation).toContain("no-action");
   });
 
   it("rejects executable mode changes on new and existing files", () => {

@@ -277,6 +277,15 @@ export function buildAgentBootstrap(inputFile) {
   ].join(" ");
 }
 
+export function buildAgentContinuation(resultFile) {
+  const normalized = normalizeRepoRelativePath(resultFile);
+  return [
+    "Continue the unfinished authoritative task from this same session; do not restart the analysis.",
+    `Before ending this turn, write the required schema-valid result to ${normalized}.`,
+    "If no candidate has sufficient evidence, write the required no-action result instead of stopping at intermediate analysis.",
+  ].join(" ");
+}
+
 export function assertAllowedModeSummary(modeSummary) {
   const disallowedMode =
     /(?:create|delete|old|new) mode (?:120000|160000)|mode change (?:120000|160000) =>|(?:create mode|mode change \d+ =>|new mode) 100755/;
