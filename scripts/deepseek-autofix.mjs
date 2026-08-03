@@ -10,6 +10,7 @@ import {
   assertAllowedModeSummary,
   branchSlug,
   buildAgentBootstrap,
+  buildAgentContinuation,
   buildIssueFingerprint,
   extractAgentText,
   extractJsonObject,
@@ -32,6 +33,9 @@ const PATCH_PATH = path.join(BUNDLE_DIR, "changes.patch");
 const MANIFEST_PATH = path.join(BUNDLE_DIR, "manifest.json");
 const MODEL_REF = "opencode-go/deepseek-v4-pro";
 const VERIFY_IMAGE = "deepseek-autofix-verify:node24";
+const MAX_AGENT_TURNS = 3;
+// Three repair turns plus one review turn must leave time inside the 75-minute Actions job.
+const AGENT_TURN_TIMEOUT_SECONDS = 15 * 60;
 
 function fail(message) {
   throw new Error(message);
@@ -213,26 +217,33 @@ function configure(access) {
   console.log(`Configured sandboxed OpenClaw agent with ${access} workspace access.`);
 }
 
-function invokeAgent(message, agentId) {
-  const inputFile = `.artifacts/deepseek-autofix/${agentId}-input.md`;
-  writeFileSync(path.join(ROOT, inputFile), `${message}\n`, "utf8");
+function runAgentTurn(message, agentId) {
+  const runId = process.env.GITHUB_RUN_ID || "local";
   const output = run("pnpm", [
     "openclaw",
     "agent",
     "--local",
     "--agent",
     agentId,
+    "--session-key",
+    `agent:${agentId}:deepseek-autofix-${runId}`,
     "--model",
     MODEL_REF,
     "--thinking",
     "high",
     "--timeout",
-    "2700",
+    String(AGENT_TURN_TIMEOUT_SECONDS),
     "--json",
     "--message",
-    buildAgentBootstrap(inputFile),
+    message,
   ]);
   return JSON.parse(output);
+}
+
+function invokeAgent(message, agentId) {
+  const inputFile = `.artifacts/deepseek-autofix/${agentId}-input.md`;
+  writeFileSync(path.join(ROOT, inputFile), `${message}\n`, "utf8");
+  return runAgentTurn(buildAgentBootstrap(inputFile), agentId);
 }
 
 function runAgent() {
@@ -243,7 +254,13 @@ function runAgent() {
   const prompt = readFileSync(promptPath, "utf8");
   const context = readFileSync(CONTEXT_PATH, "utf8");
   const message = `${prompt}\n\n<untrusted_context_json>\n${context}\n</untrusted_context_json>`;
-  const response = invokeAgent(message, "main");
+  let response = invokeAgent(message, "main");
+  writeJson(path.join(ARTIFACT_DIR, "agent-response-1.json"), response);
+  for (let turn = 2; turn <= MAX_AGENT_TURNS && !existsSync(RESULT_PATH); turn += 1) {
+    console.log(`DeepSeek agent stopped before writing its result; continuing turn ${turn}.`);
+    response = runAgentTurn(buildAgentContinuation(path.relative(ROOT, RESULT_PATH)), "main");
+    writeJson(path.join(ARTIFACT_DIR, `agent-response-${turn}.json`), response);
+  }
   writeJson(path.join(ARTIFACT_DIR, "agent-response.json"), response);
   if (!existsSync(RESULT_PATH)) {
     fail(`agent did not write ${path.relative(ROOT, RESULT_PATH)}`);
