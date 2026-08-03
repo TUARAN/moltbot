@@ -283,6 +283,8 @@ export function buildAgentContinuation(resultFile) {
     "Continue the unfinished authoritative task from this same session; do not restart the analysis.",
     `Before ending this turn, write the required schema-valid result to ${normalized}.`,
     "If no candidate has sufficient evidence, write the required no-action result instead of stopping at intermediate analysis.",
+    "Leave the Git index clean; unstage files with git restore --staged before finishing.",
+    "For issue-only or no-action, inspect git status and restore or remove every non-artifact workspace change; those outcomes require a clean workspace.",
   ].join(" ");
 }
 
