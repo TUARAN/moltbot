@@ -317,11 +317,19 @@ export function extractJsonObject(text) {
   try {
     return JSON.parse(trimmed);
   } catch {
-    const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)```$/i);
-    if (fenced) {
-      return JSON.parse(fenced[1]);
+    const parsedFences = [...trimmed.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)].flatMap(
+      (match) => {
+        try {
+          return [JSON.parse(match[1])];
+        } catch {
+          return [];
+        }
+      },
+    );
+    if (parsedFences.length === 1) {
+      return parsedFences[0];
     }
-    throw new Error("agent response must be exactly JSON or one fenced JSON block");
+    throw new Error("agent response must contain exactly one JSON value or fenced JSON block");
   }
 }
 

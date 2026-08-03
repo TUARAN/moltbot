@@ -236,17 +236,24 @@ describe("DeepSeek autofix contracts", () => {
     expect(() => flattenPaginatedItems([{ number: 1 }])).toThrow(/array of pages/);
   });
 
-  it("extracts strict review JSON from OpenClaw payloads", () => {
+  it("extracts one unambiguous review JSON value from OpenClaw payloads", () => {
     const text = extractAgentText({
       payloads: [{ text: '```json\n{"verdict":"pass","findings":[]}\n```' }],
     });
     expect(extractJsonObject(text)).toEqual({ verdict: "pass", findings: [] });
     expect(() => extractJsonObject('Review passed: {"verdict":"pass","findings":[]}')).toThrow(
-      /exactly JSON/,
+      /exactly one JSON/,
     );
+    expect(
+      extractJsonObject(
+        'Review evidence first.\n```json\n{"verdict":"pass","findings":[]}\n```\nDone.',
+      ),
+    ).toEqual({ verdict: "pass", findings: [] });
     expect(() =>
-      extractJsonObject('```json\n{"verdict":"pass","findings":[]}\n```\nExtra reviewer prose'),
-    ).toThrow(/exactly JSON/);
+      extractJsonObject(
+        '```json\n{"verdict":"pass","findings":[]}\n```\n```json\n{"verdict":"fail","findings":[]}\n```',
+      ),
+    ).toThrow(/exactly one JSON/);
   });
 
   it("fails closed on malformed review results", () => {
