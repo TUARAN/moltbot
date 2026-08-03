@@ -419,7 +419,9 @@ function verify() {
     /\.(?:[cm]?[jt]sx?|json|json5|ya?ml|md|mdx|css|scss|html)$/.test(file),
   );
   if (formattable.length > 0) {
-    runVerificationCommand(["pnpm", "exec", "oxfmt", "--check", "--threads=1", ...formattable]);
+    // The candidate checkout is intentionally read-only during verification. Invoking pnpm here
+    // can trigger its dependency-status install path, which writes a probe beside package.json.
+    runVerificationCommand(["node_modules/.bin/oxfmt", "--check", "--threads=1", ...formattable]);
   }
   if (result.testFiles.length > 0) {
     runVerificationCommand(["node", "scripts/run-vitest.mjs", ...result.testFiles]);
