@@ -18,6 +18,7 @@ import {
   parseAgentResult,
   parseReviewResult,
   sanitizePublishedTitle,
+  shouldContinueAgent,
   validatePatch,
 } from "../../scripts/deepseek-autofix/contracts.mjs";
 
@@ -237,6 +238,32 @@ describe("DeepSeek autofix contracts", () => {
     expect(continuation).toContain("result.json");
     expect(continuation).toContain("no-action");
     expect(continuation).toContain("clean workspace");
+  });
+
+  it("continues when the agent writes an invalid intermediate result", () => {
+    expect(
+      shouldContinueAgent({
+        result: { outcome: "issue-only", issueBody: "" },
+        stagedFiles: [],
+        changedFiles: [],
+      }),
+    ).toBe(true);
+    expect(
+      shouldContinueAgent({
+        result: {
+          outcome: "no-action",
+          title: "",
+          summary: "",
+          rootCause: "",
+          issueBody: "",
+          prBody: "",
+          testFiles: [],
+          sourceUrls: [],
+        },
+        stagedFiles: [],
+        changedFiles: [],
+      }),
+    ).toBe(false);
   });
 
   it("rejects executable mode changes on new and existing files", () => {

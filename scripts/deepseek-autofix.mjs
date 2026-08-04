@@ -20,6 +20,7 @@ import {
   parseAgentResult,
   parseReviewResult,
   sanitizePublishedTitle,
+  shouldContinueAgent,
   validatePatch,
 } from "./deepseek-autofix/contracts.mjs";
 
@@ -258,11 +259,17 @@ function agentNeedsContinuation() {
   if (!existsSync(RESULT_PATH)) {
     return true;
   }
-  const result = parseAgentResult(readJson(RESULT_PATH));
-  if (stagedFiles().length > 0) {
+  let result;
+  try {
+    result = readJson(RESULT_PATH);
+  } catch {
     return true;
   }
-  return result.outcome !== "fix-ready" && changedFiles().length > 0;
+  return shouldContinueAgent({
+    result,
+    stagedFiles: stagedFiles(),
+    changedFiles: changedFiles(),
+  });
 }
 
 function runAgent() {

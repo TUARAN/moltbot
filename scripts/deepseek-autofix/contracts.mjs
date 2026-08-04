@@ -137,6 +137,19 @@ export function parseAgentResult(value) {
   return result;
 }
 
+export function shouldContinueAgent({ result, stagedFiles, changedFiles }) {
+  let parsed;
+  try {
+    parsed = parseAgentResult(result);
+  } catch {
+    return true;
+  }
+  if (stagedFiles.length > 0) {
+    return true;
+  }
+  return parsed.outcome !== "fix-ready" && changedFiles.length > 0;
+}
+
 export function parseReviewResult(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("review result must be an object");
