@@ -180,6 +180,7 @@ function configure(access) {
     agents: {
       defaults: {
         workspace,
+        skipBootstrap: true,
         model: {
           primary: AUTOFIX_MODEL_POLICY.primary,
           fallbacks: [...AUTOFIX_MODEL_POLICY.fallbacks],

@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -41,6 +41,32 @@ describe("DeepSeek autofix contracts", () => {
       primary: "opencode-go/deepseek-v4-pro",
       fallbacks: ["deepseek/deepseek-v4-pro"],
     });
+  });
+
+  it("disables workspace bootstrap creation for the automation agent", () => {
+    const workspace = mkdtempSync(path.join(tmpdir(), "deepseek-autofix-config-"));
+    const configPath = path.join(workspace, "openclaw.json");
+    try {
+      const configured = spawnSync(
+        process.execPath,
+        [path.join(process.cwd(), "scripts", "deepseek-autofix.mjs"), "configure", "rw"],
+        {
+          cwd: workspace,
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            GITHUB_WORKSPACE: workspace,
+            OPENCLAW_CONFIG_PATH: configPath,
+          },
+          stdio: "pipe",
+        },
+      );
+      expect(configured.status).toBe(0);
+      const config = JSON.parse(readFileSync(configPath, "utf8"));
+      expect(config.agents.defaults.skipBootstrap).toBe(true);
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+    }
   });
 
   it.each([
