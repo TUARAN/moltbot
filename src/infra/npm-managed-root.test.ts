@@ -234,10 +234,10 @@ describe("managed npm root", () => {
 
   it("reads package-level npm overrides for managed plugin installs", async () => {
     await expect(readOpenClawManagedNpmRootOverrides()).resolves.toEqual({
-      axios: "1.16.0",
-      "fast-uri": "3.1.2",
+      axios: "1.18.1",
+      "fast-uri": "4.1.2",
       "follow-redirects": "1.16.0",
-      "ip-address": "10.2.0",
+      "ip-address": "10.3.1",
       "node-domexception": "npm:@nolyfill/domexception@1.0.28",
       uuid: "14.0.0",
     });
