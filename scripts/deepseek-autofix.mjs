@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import {
   AUTOFIX_MARKER,
+  AUTOFIX_MODEL_POLICY,
   DEFAULT_POLICY,
   UPSTREAM_SYNC_MARKER,
   assertAllowedModeSummary,
@@ -19,11 +20,13 @@ import {
   parseAgentResult,
   parseReviewResult,
   sanitizePublishedTitle,
+  shouldContinueAgent,
   validatePatch,
 } from "./deepseek-autofix/contracts.mjs";
 
 const ROOT = process.cwd();
 const TRUSTED_ROOT = process.env.DEEPSEEK_AUTOFIX_TRUSTED_ROOT || ROOT;
+const RUNTIME_ROOT = process.env.DEEPSEEK_AUTOFIX_RUNTIME_ROOT || ROOT;
 const ARTIFACT_DIR = path.join(ROOT, ".artifacts", "deepseek-autofix");
 const CONTEXT_PATH = path.join(ARTIFACT_DIR, "context.json");
 const RESULT_PATH = path.join(ARTIFACT_DIR, "result.json");
@@ -31,7 +34,6 @@ const REVIEW_PATH = path.join(ARTIFACT_DIR, "review.json");
 const BUNDLE_DIR = path.join(ARTIFACT_DIR, "bundle");
 const PATCH_PATH = path.join(BUNDLE_DIR, "changes.patch");
 const MANIFEST_PATH = path.join(BUNDLE_DIR, "manifest.json");
-const MODEL_REF = "opencode-go/deepseek-v4-pro";
 const VERIFY_IMAGE = "deepseek-autofix-verify:node24";
 const MAX_AGENT_TURNS = 3;
 // Three repair turns plus one review turn must leave time inside the 75-minute Actions job.
@@ -179,7 +181,11 @@ function configure(access) {
     agents: {
       defaults: {
         workspace,
-        model: { primary: MODEL_REF, fallbacks: [] },
+        skipBootstrap: true,
+        model: {
+          primary: AUTOFIX_MODEL_POLICY.primary,
+          fallbacks: [...AUTOFIX_MODEL_POLICY.fallbacks],
+        },
         thinkingDefault: "high",
         sandbox: {
           mode: "all",
@@ -219,24 +225,27 @@ function configure(access) {
 
 function runAgentTurn(message, agentId) {
   const runId = process.env.GITHUB_RUN_ID || "local";
-  const output = run("pnpm", [
-    "openclaw",
-    "agent",
-    "--local",
-    "--agent",
-    agentId,
-    "--session-key",
-    `agent:${agentId}:deepseek-autofix-${runId}`,
-    "--model",
-    MODEL_REF,
-    "--thinking",
-    "high",
-    "--timeout",
-    String(AGENT_TURN_TIMEOUT_SECONDS),
-    "--json",
-    "--message",
-    message,
-  ]);
+  const output = run(
+    "node",
+    [
+      path.join(RUNTIME_ROOT, "openclaw.mjs"),
+      "agent",
+      "--local",
+      "--agent",
+      agentId,
+      "--session-key",
+      `agent:${agentId}:deepseek-autofix-${runId}`,
+      "--thinking",
+      "high",
+      "--timeout",
+      String(AGENT_TURN_TIMEOUT_SECONDS),
+      "--json",
+      "--message",
+      message,
+    ],
+    // Provider credentials stay in a runtime checkout that the repair workspace cannot modify.
+    { cwd: RUNTIME_ROOT },
+  );
   return JSON.parse(output);
 }
 
@@ -250,11 +259,17 @@ function agentNeedsContinuation() {
   if (!existsSync(RESULT_PATH)) {
     return true;
   }
-  const result = parseAgentResult(readJson(RESULT_PATH));
-  if (stagedFiles().length > 0) {
+  let result;
+  try {
+    result = readJson(RESULT_PATH);
+  } catch {
     return true;
   }
-  return result.outcome !== "fix-ready" && changedFiles().length > 0;
+  return shouldContinueAgent({
+    result,
+    stagedFiles: stagedFiles(),
+    changedFiles: changedFiles(),
+  });
 }
 
 function runAgent() {
@@ -412,7 +427,9 @@ function verify() {
     /\.(?:[cm]?[jt]sx?|json|json5|ya?ml|md|mdx|css|scss|html)$/.test(file),
   );
   if (formattable.length > 0) {
-    runVerificationCommand(["pnpm", "exec", "oxfmt", "--check", "--threads=1", ...formattable]);
+    // The candidate checkout is intentionally read-only during verification. Invoking pnpm here
+    // can trigger its dependency-status install path, which writes a probe beside package.json.
+    runVerificationCommand(["node_modules/.bin/oxfmt", "--check", "--threads=1", ...formattable]);
   }
   if (result.testFiles.length > 0) {
     runVerificationCommand(["node", "scripts/run-vitest.mjs", ...result.testFiles]);

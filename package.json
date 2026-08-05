@@ -1903,12 +1903,12 @@
     "qrcode": "1.5.4",
     "quickjs-wasi": "3.0.0",
     "rastermill": "0.3.1",
-    "tar": "7.5.15",
+    "tar": "7.5.22",
     "tree-sitter-bash": "0.25.1",
     "tslog": "4.10.2",
     "typebox": "1.1.39",
     "typescript": "6.0.3",
-    "undici": "8.3.0",
+    "undici": "8.9.0",
     "web-push": "3.6.7",
     "web-tree-sitter": "0.26.9",
     "ws": "8.21.0",
@@ -1933,8 +1933,8 @@
     "@types/proper-lockfile": "4.1.4",
     "@types/ws": "8.18.1",
     "@typescript/native-preview": "7.0.0-dev.20260527.2",
-    "@vitest/coverage-v8": "4.1.7",
-    "esbuild": "0.28.0",
+    "@vitest/coverage-v8": "4.1.10",
+    "esbuild": "0.28.1",
     "jscpd": "4.2.4",
     "jsdom": "29.1.1",
     "lit": "3.3.3",
@@ -1946,16 +1946,16 @@
     "tsdown": "0.22.1",
     "tsx": "4.22.3",
     "unrun": "0.3.0",
-    "vitest": "4.1.7"
+    "vitest": "4.1.10"
   },
   "optionalDependencies": {
     "sqlite-vec": "0.1.9"
   },
   "overrides": {
-    "axios": "1.16.0",
-    "fast-uri": "3.1.2",
+    "axios": "1.18.1",
+    "fast-uri": "4.1.2",
     "follow-redirects": "1.16.0",
-    "ip-address": "10.2.0",
+    "ip-address": "10.3.1",
     "node-domexception": "npm:@nolyfill/domexception@1.0.28",
     "uuid": "14.0.0"
   },

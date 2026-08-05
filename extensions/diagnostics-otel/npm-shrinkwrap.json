@@ -112,9 +112,9 @@
       }
     },
     "node_modules/@opentelemetry/core": {
-      "version": "2.7.1",
-      "resolved": "https://registry.npmjs.org/@opentelemetry/core/-/core-2.7.1.tgz",
-      "integrity": "sha512-QAqIj32AtK6+pEVNG7EOVxHdE06RP+FM5qpiEJ4RtDcFIqKUZHYhl7/7UY5efhwmwNAg7j8QbJVBLxMerc0+gw==",
+      "version": "2.10.0",
+      "resolved": "https://registry.npmjs.org/@opentelemetry/core/-/core-2.10.0.tgz",
+      "integrity": "sha512-/wNZ8twnEQQA4HoHu22+vcsdru6pWPWxW+7w+FlxT6Id7PE/WIbZmVKkte+PF72e0F2dnImFeHD2syyE1Mw6MQ==",
       "license": "Apache-2.0",
       "dependencies": {
         "@opentelemetry/semantic-conventions": "^1.29.0"
@@ -429,12 +429,12 @@
       }
     },
     "node_modules/@opentelemetry/propagator-jaeger": {
-      "version": "2.7.1",
-      "resolved": "https://registry.npmjs.org/@opentelemetry/propagator-jaeger/-/propagator-jaeger-2.7.1.tgz",
-      "integrity": "sha512-KMjVBHzP4N60bOzxja76M1F1hZZ43lGPga5ix+mkv9+kk1nx9SbkxSvJsMbuVUxdPQmsPTqGShmhN8ulrMOg6Q==",
+      "version": "2.10.0",
+      "resolved": "https://registry.npmjs.org/@opentelemetry/propagator-jaeger/-/propagator-jaeger-2.10.0.tgz",
+      "integrity": "sha512-yw/IX8DL470dSMZJoE82ScfYGp7JWZ/G8kFJo35ZILUVTB2jFPTOaioN+8s09pH0RHsWNhweVZb+ZnjJJpCChg==",
       "license": "Apache-2.0",
       "dependencies": {
-        "@opentelemetry/core": "2.7.1"
+        "@opentelemetry/core": "2.10.0"
       },
       "engines": {
         "node": "^18.19.0 || >=20.6.0"
@@ -748,10 +748,9 @@
       "license": "MIT"
     },
     "node_modules/protobufjs": {
-      "version": "8.4.0",
-      "resolved": "https://registry.npmjs.org/protobufjs/-/protobufjs-8.4.0.tgz",
-      "integrity": "sha512-iriNhQ57SYA5Jbdi+41AyPdx6jPPkFO7DODzkOBmqFhgYn/JzX2HxgxYPY18eQAs3CP/AWqtPvkWn8rclRAxdQ==",
-      "hasInstallScript": true,
+      "version": "8.7.1",
+      "resolved": "https://registry.npmjs.org/protobufjs/-/protobufjs-8.7.1.tgz",
+      "integrity": "sha512-agdGHrXNTv0IrYscJPDou/PlEJk1c/hBZ9o/B5NH2i/nSPtPqacNxzgwf1CebXxFMjMrZH5sqv9uQuw96aGt/A==",
       "license": "BSD-3-Clause",
       "dependencies": {
         "long": "^5.3.2"

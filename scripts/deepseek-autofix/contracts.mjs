@@ -3,6 +3,10 @@ import path from "node:path";
 
 export const AUTOFIX_MARKER = "<!-- deepseek-autofix -->";
 export const UPSTREAM_SYNC_MARKER = "<!-- deepseek-autofix:upstream-sync -->";
+export const AUTOFIX_MODEL_POLICY = Object.freeze({
+  primary: "opencode-go/deepseek-v4-pro",
+  fallbacks: Object.freeze(["deepseek/deepseek-v4-pro"]),
+});
 
 export const DEFAULT_POLICY = Object.freeze({
   forkRepository: "TUARAN/moltbot",
@@ -131,6 +135,19 @@ export function parseAgentResult(value) {
     requireString(result.prBody, "prBody");
   }
   return result;
+}
+
+export function shouldContinueAgent({ result, stagedFiles, changedFiles }) {
+  let parsed;
+  try {
+    parsed = parseAgentResult(result);
+  } catch {
+    return true;
+  }
+  if (stagedFiles.length > 0) {
+    return true;
+  }
+  return parsed.outcome !== "fix-ready" && changedFiles.length > 0;
 }
 
 export function parseReviewResult(value) {
