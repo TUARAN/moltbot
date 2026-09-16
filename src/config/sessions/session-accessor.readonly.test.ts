@@ -239,8 +239,8 @@ describe("session accessor readonly listing", () => {
       listed
         .filter(({ sessionKey }) => !["global", "unknown"].includes(sessionKey))
         .map(({ sessionKey }) => sessionKey)
-        .toSorted(),
-    ).toEqual(expectedKeys.toSorted());
+        .toSorted((left, right) => left.localeCompare(right)),
+    ).toEqual(expectedKeys.toSorted((left, right) => left.localeCompare(right)));
     const summary = readSessionStoreSummaryReadOnly(scope, options);
     expect(summary.count).toBe(7);
     expect(summary.recent.map(({ sessionKey }) => sessionKey)).toEqual(expectedKeys.slice(0, 3));
@@ -479,6 +479,32 @@ describe("session accessor readonly listing", () => {
     expect(hasSessionEntriesByStatusReadOnly({ agentId, env }, ["done"])).toBe(false);
     expect(countRegisteredAgentDatabases(env)).toBe(0);
   });
+
+  it.each(["interrupted", "failed"] as const)(
+    "probes canonical %s without conflating its shared derived status",
+    async (status) => {
+      const env = { OPENCLAW_STATE_DIR: autoTempDirs.make("openclaw-readonly-canonical-status-") };
+      const scope = { agentId: "worker-1", env };
+      await upsertSessionEntryCore(
+        { ...scope, sessionKey: "agent:worker-1:main" },
+        { sessionId: "session-1", status, updatedAt: 10 },
+      );
+      closeOpenClawAgentDatabasesForTest();
+      clearRegisteredAgentDatabases(env);
+
+      expect(hasSessionEntriesByStatusReadOnly(scope, [status])).toBe(true);
+      expect(
+        hasSessionEntriesByStatusReadOnly(scope, [
+          status === "interrupted" ? "failed" : "interrupted",
+        ]),
+      ).toBe(false);
+      expect(hasSessionEntriesByStatusReadOnly(scope, ["interrupted", "failed"])).toBe(true);
+      expect(hasSessionEntriesByStatusReadOnly(scope, ["running", "done"])).toBe(false);
+      expect(hasSessionEntriesByStatusReadOnly(scope, [])).toBe(false);
+      expect(countRegisteredAgentDatabases(env)).toBe(0);
+      expect(isOpenClawAgentDatabaseOpen(resolveOpenClawAgentSqlitePath(scope))).toBe(false);
+    },
+  );
 
   it("resolves a missing session identity without creating or registering a database", () => {
     const stateDir = makeTempDir(tempDirs, "openclaw-session-readonly-missing-identity-");
@@ -746,6 +772,37 @@ describe("session accessor readonly listing", () => {
       if (!exact && !fallback) {
         return statement;
       }
+      const afterRead = () => {
+        events.push(exact ? "exact-read" : "fallback-read");
+        if (exact) {
+          // Commit after SQLite finishes the exact read. The identity-only probe
+          // still requires a fallback, whose later row must replace that snapshot.
+          external.exec("BEGIN IMMEDIATE");
+          try {
+            external
+              .prepare(
+                "UPDATE session_nodes SET entry_json = ?, updated_at = ? WHERE session_key = ?",
+              )
+              .run(JSON.stringify({ sessionId, updatedAt: 2 }), 3, sessionKey);
+            external
+              .prepare("UPDATE session_nodes SET entry_valid = 1 WHERE session_key = ?")
+              .run(sessionKey);
+            external.exec("COMMIT");
+            events.push("external-commit");
+          } catch (error) {
+            external.exec("ROLLBACK");
+            throw error;
+          }
+        }
+      };
+      const originalAll = statement.all.bind(statement);
+      statement.all = new Proxy(originalAll, {
+        apply(all, _receiver, args) {
+          const rows = all(...args);
+          afterRead();
+          return rows;
+        },
+      });
       const originalIterate = statement.iterate.bind(statement) as (
         ...args: unknown[]
       ) => ReturnType<StatementSync["iterate"]>;
@@ -753,27 +810,7 @@ describe("session accessor readonly listing", () => {
         const rows = originalIterate(...args);
         return (function* () {
           yield* rows;
-          events.push(exact ? "exact-read" : "fallback-read");
-          if (exact) {
-            // Commit after SQLite finishes the exact read. The identity-only probe
-            // still requires a fallback, whose later row must replace that snapshot.
-            external.exec("BEGIN IMMEDIATE");
-            try {
-              external
-                .prepare(
-                  "UPDATE session_nodes SET entry_json = ?, updated_at = ? WHERE session_key = ?",
-                )
-                .run(JSON.stringify({ sessionId, updatedAt: 2 }), 3, sessionKey);
-              external
-                .prepare("UPDATE session_nodes SET entry_valid = 1 WHERE session_key = ?")
-                .run(sessionKey);
-              external.exec("COMMIT");
-              events.push("external-commit");
-            } catch (error) {
-              external.exec("ROLLBACK");
-              throw error;
-            }
-          }
+          afterRead();
         })();
       }) as StatementSync["iterate"];
       return statement;

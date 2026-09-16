@@ -88,6 +88,8 @@ export async function handleDiscordMessageAction(
           requesterAccountId: ctx.requesterAccountId,
           currentChannelProvider: ctx.toolContext.currentChannelProvider,
           currentChannelId: ctx.toolContext.currentChannelId,
+          currentChatType: ctx.toolContext.currentChatType,
+          currentMessagingTarget: ctx.toolContext.currentMessagingTarget,
         }
       : undefined;
   const readPolicyOptions: DiscordMessagingActionOptions | undefined =
@@ -365,6 +367,7 @@ export async function handleDiscordMessageAction(
         before: readStringParam(params, "before"),
         after: readStringParam(params, "after"),
         around: readStringParam(params, "around"),
+        messageId: readStringParam(params, "messageId"),
       },
       cfg,
       actionOptions,

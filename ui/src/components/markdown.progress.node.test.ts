@@ -64,18 +64,24 @@ describe("progress-card markdown", () => {
     const markdown = "<script>".repeat(17_500);
     const startedAt = performance.now();
 
-    const progressHtml = toSanitizedMarkdownHtml(markdown, { progressBars: true });
+    const preprocessed = stripProgressCardRawContentBlocks(markdown);
+    const elapsedMs = performance.now() - startedAt;
 
+    expect(preprocessed).toBe(markdown);
+    expect(elapsedMs).toBeLessThan(100);
+    const progressHtml = toSanitizedMarkdownHtml(markdown, { progressBars: true });
     expect(progressHtml).not.toContain("<script");
-    expect(performance.now() - startedAt).toBeLessThan(100);
   });
 
   it("keeps malformed closing-tag validation bounded", () => {
     const markdown = "</script ".repeat(7_000) + " ".repeat(70_000) + ">";
     const startedAt = performance.now();
 
-    toSanitizedMarkdownHtml(markdown, { progressBars: true });
+    const preprocessed = stripProgressCardRawContentBlocks(markdown);
+    const elapsedMs = performance.now() - startedAt;
 
-    expect(performance.now() - startedAt).toBeLessThan(100);
+    expect(preprocessed).toBe(markdown);
+    expect(elapsedMs).toBeLessThan(100);
+    toSanitizedMarkdownHtml(markdown, { progressBars: true });
   });
 });

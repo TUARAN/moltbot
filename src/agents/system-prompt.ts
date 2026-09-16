@@ -600,7 +600,7 @@ function buildMessagingSection(params: {
       : []),
     subagentOrchestrationGuidance,
     completionEventGuidance,
-    "- Provider messaging: never exec/curl; OpenClaw routes.",
+    "- OpenClaw channel replies/actions: use OpenClaw routing, not exec/curl. Other services (e.g. email): user-authorized CLI/API use is allowed; normal tool permissions and approvals still apply.",
     messageToolAvailable
       ? [
           "",
@@ -1481,6 +1481,7 @@ export function buildAgentSystemPrompt(params: {
     ...(!isMinimal
       ? [
           buildUiPresentationPrompt({
+            screenToolName: availableTools.has("screen") ? resolveToolName("screen") : undefined,
             messageTool: messageToolAvailable ? params.messageTool : undefined,
             showWidgetToolName: availableTools.has("show_widget")
               ? resolveToolName("show_widget")

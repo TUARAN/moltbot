@@ -18,6 +18,8 @@ import type { SessionEntry } from "../../config/sessions/types.js";
 import type { AgentRouteBinding } from "../../config/types.agents.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { formatErrorMessage } from "../../infra/errors.js";
+import { withSystemEventOwner } from "../../infra/system-event-ownership.js";
+import { enqueueSystemEventEntry } from "../../infra/system-events.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import {
   logSessionOwnershipLookupFailure,
@@ -67,7 +69,11 @@ import {
 } from "../embedded-agent-runner/runs.js";
 import { resolveNestedAgentLaneForSession } from "../lanes.js";
 import { runOutsidePreparedModelRuntimePluginGenerationScope } from "../prepared-model-runtime-generation-scope.js";
-import { type AgentWaitResult, waitForAgentRunReply } from "../run-wait.js";
+import {
+  type AgentWaitResult,
+  isTerminalAgentWaitTimeout,
+  waitForAgentRunReply,
+} from "../run-wait.js";
 import { loadSessionEntryByKey } from "../subagents/announce/subagent-announce-delivery.js";
 import {
   describeSessionsSendTool,
@@ -105,6 +111,9 @@ const SessionsSendToolSchema = Type.Object({
   message: Type.String(),
   timeoutSeconds: Type.Optional(Type.Integer({ minimum: 0 })),
   watch: Type.Optional(Type.Boolean()),
+  mode: Type.Optional(
+    Type.Union([Type.Literal("notify"), Type.Literal("steer"), Type.Literal("followup")]),
+  ),
 });
 
 const log = createSubsystemLogger("agents/sessions-send");
@@ -118,6 +127,16 @@ const SessionsSendDeliverySchema = Type.Object(
 );
 
 const SessionsSendOutputSchema = Type.Union([
+  Type.Object(
+    {
+      status: Type.Literal("queued"),
+      sessionKey: Type.String(),
+      notificationId: Type.String(),
+      durability: Type.Literal("process"),
+      runStarted: Type.Literal(false),
+    },
+    { additionalProperties: false },
+  ),
   Type.Object(
     {
       runId: Type.String(),
@@ -307,10 +326,6 @@ function isRequesterParentOfNativeSubagentSession(params: {
   );
 }
 
-function isTerminalAgentWaitTimeout(result: AgentWaitResult): boolean {
-  return result.endedAt !== undefined || Boolean(result.stopReason || result.livenessState);
-}
-
 function isPendingErrorAgentWaitTimeout(result: AgentWaitResult): boolean {
   return (
     result.pendingError === true && typeof result.error === "string" && result.error.trim() !== ""
@@ -373,6 +388,7 @@ async function startAgentRun(params: {
   allowActiveRunQueueDelivery?: boolean;
   allowActiveRunQueueFallback?: boolean;
   expectedSessionId?: string;
+  mode?: "steer" | "followup";
 }): Promise<
   | {
       ok: true;
@@ -385,9 +401,17 @@ async function startAgentRun(params: {
 > {
   try {
     const activeRunSessionId =
-      params.allowActiveRunQueueDelivery && isRunScopedAgentSessionKey(params.sessionKey)
+      params.mode === "steer" ||
+      (params.mode !== "followup" &&
+        params.allowActiveRunQueueDelivery &&
+        isRunScopedAgentSessionKey(params.sessionKey))
         ? resolveActiveEmbeddedRunSessionId(params.sessionKey)
         : undefined;
+    if (params.mode === "steer" && !activeRunSessionId) {
+      throw new Error(
+        "Target has no active run that accepts steering. Use mode=followup to start a new turn.",
+      );
+    }
     if (
       activeRunSessionId &&
       params.expectedSessionId &&
@@ -407,7 +431,7 @@ async function startAgentRun(params: {
         debounceMs: 0,
         deliveryTimeoutMs: params.deliveryTimeoutMs,
         waitForTranscriptCommit: true,
-        sourceReplyDeliveryMode,
+        ...(params.mode === "steer" ? {} : { sourceReplyDeliveryMode }),
         // Carry the same input facts as a new run; transcript ownership stays
         // with the receiving runtime and its exact session incarnation.
         userTurnTranscriptRecorder: createUserTurnTranscriptRecorder({
@@ -447,6 +471,7 @@ async function startAgentRun(params: {
       const fallbackSessionKey = resolveCronRunScopedFallbackSessionKey(params.sessionKey);
       if (
         params.allowActiveRunQueueFallback !== false &&
+        params.mode !== "steer" &&
         fallbackSessionKey &&
         shouldFallbackCronRunScopedActiveDelivery(queueOutcome)
       ) {
@@ -526,7 +551,12 @@ export function createSessionsSendTool(opts?: {
       if (!message.trim()) {
         throw new ToolInputError("message required");
       }
-      const timeoutSeconds = readNonNegativeIntegerParam(params, "timeoutSeconds") ?? 30;
+      const mode = readToolStringParam(params, "mode");
+      if (mode !== undefined && mode !== "notify" && mode !== "steer" && mode !== "followup") {
+        throw new ToolInputError("mode must be notify, steer, or followup");
+      }
+      const timeoutSeconds =
+        mode === "steer" ? 0 : (readNonNegativeIntegerParam(params, "timeoutSeconds") ?? 30);
       const {
         cfg,
         mainKey,
@@ -955,6 +985,15 @@ export function createSessionsSendTool(opts?: {
         });
       }
       const expectedSessionId = opts?.expectedTargetSessionId ?? access.expectedSessionId;
+      if (mode === "notify" && expectedSessionId) {
+        return jsonResult({
+          runId,
+          status: "forbidden",
+          sessionKey: displayKey,
+          error:
+            "Notifications cannot outlive an exact-session access grant. Use steer or followup.",
+        });
+      }
 
       return await runWithScopedSessionAccess({
         cfg,
@@ -964,6 +1003,15 @@ export function createSessionsSendTool(opts?: {
         targetSessionKey: resolvedKey,
         run: async () => {
           if (visibleSession.missing) {
+            if (mode === "steer" || mode === "notify") {
+              return jsonResult({
+                runId,
+                status: "error",
+                error:
+                  "Cannot notify or steer a missing session. Use mode=followup to start a new turn.",
+                sessionKey: displayKey,
+              });
+            }
             const createdSession = await createConfiguredAgentMainSession({
               cfg,
               callGateway: gatewayCall,
@@ -1013,6 +1061,30 @@ export function createSessionsSendTool(opts?: {
             sourceChannel: requesterChannel,
             sourceTool: "sessions_send",
           };
+          if (mode === "notify") {
+            const event = enqueueSystemEventEntry(
+              annotateInterSessionPromptText(message, inputProvenance),
+              withSystemEventOwner(
+                { sessionKey: resolvedKey, contextKey: `session-notify:${idempotencyKey}` },
+                targetAgentId,
+              ),
+            );
+            if (!event?.id) {
+              return jsonResult({
+                runId,
+                status: "error",
+                sessionKey: displayKey,
+                error: "Notification was not queued.",
+              });
+            }
+            return jsonResult({
+              status: "queued",
+              sessionKey: displayKey,
+              notificationId: event.id,
+              durability: "process",
+              runStarted: false,
+            });
+          }
           const sendParams = {
             message: annotateInterSessionPromptText(message, inputProvenance),
             agentId: targetAgentId,
@@ -1124,8 +1196,9 @@ export function createSessionsSendTool(opts?: {
             cfg,
             callGateway: gatewayCall,
             runId,
+            mode,
             sendParams,
-            sessionKey: displayKey,
+            sessionKey: mode ? resolvedKey : displayKey,
             deliveryTimeoutMs: announceTimeoutMs,
             ...(timeoutSeconds === 0
               ? {

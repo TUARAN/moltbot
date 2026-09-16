@@ -366,16 +366,6 @@ enum ExecApprovalNotificationBridge {
             configuration: self.configuration)
     }
 
-    static func parsePrompt(
-        actionIdentifier: String,
-        userInfo: [AnyHashable: Any]) -> ApprovalNotificationPrompt?
-    {
-        ApprovalNotificationBridge.parsePrompt(
-            actionIdentifier: actionIdentifier,
-            userInfo: userInfo,
-            configuration: self.configuration)
-    }
-
     static func parseRequestedPush(userInfo: [AnyHashable: Any]) -> ApprovalNotificationPrompt? {
         ApprovalNotificationBridge.parseRequestedPush(
             userInfo: userInfo,
@@ -400,16 +390,6 @@ enum PluginApprovalNotificationBridge {
 
     static func shouldPresentNotification(userInfo: [AnyHashable: Any]) -> Bool {
         ApprovalNotificationBridge.shouldPresentNotification(
-            userInfo: userInfo,
-            configuration: self.configuration)
-    }
-
-    static func parsePrompt(
-        actionIdentifier: String,
-        userInfo: [AnyHashable: Any]) -> ApprovalNotificationPrompt?
-    {
-        ApprovalNotificationBridge.parsePrompt(
-            actionIdentifier: actionIdentifier,
             userInfo: userInfo,
             configuration: self.configuration)
     }

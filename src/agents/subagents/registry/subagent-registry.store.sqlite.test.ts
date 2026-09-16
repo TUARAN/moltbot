@@ -2,6 +2,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { DatabaseSync, constants } from "node:sqlite";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { sql } from "kysely";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -18,6 +19,7 @@ import {
   loadSubagentRunsForControllerFromSqlite,
   loadSubagentRegistryFromSqlite,
   loadSubagentSessionListRunsFromSqlite,
+  loadSubagentRunsForSessionsFromSqlite,
   saveSubagentRegistryChangesToSqlite,
   saveSubagentRegistryToSqlite,
 } from "./subagent-registry.store.sqlite.js";
@@ -143,6 +145,59 @@ describe("subagent registry sqlite store", () => {
     return await withEnvAsync({ OPENCLAW_STATE_DIR: tempStateDir }, fn);
   }
 
+  it.each([
+    [
+      "session-list",
+      (keys: readonly string[]) => loadSubagentRunsForSessionsFromSqlite(keys, [], "session-list"),
+    ],
+    ["full", (keys: readonly string[]) => loadSubagentRunsForSessionsFromSqlite(keys, [], "full")],
+  ] as const)(
+    "keeps %s identity selection and records in one snapshot across an external move",
+    async (_kind, read) => {
+      await withTempStateEnv(async () => {
+        const run = createRun({ model: "original-model" });
+        saveSubagentRegistryToSqlite(new Map([[run.runId, run]]));
+        const { db, path: databasePath } = openOpenClawStateDatabase();
+        const writer = new DatabaseSync(databasePath);
+        let moved = false;
+        db.setAuthorizer((action, table, column) => {
+          if (
+            !moved &&
+            action === constants.SQLITE_READ &&
+            table === "subagent_runs" &&
+            column === "payload_json"
+          ) {
+            moved = true;
+            writer
+              .prepare(
+                "UPDATE subagent_runs SET requester_session_key = ?, payload_json = ? WHERE run_id = ?",
+              )
+              .run(
+                "agent:main:other",
+                JSON.stringify({ ...run, model: "replacement-model" }),
+                run.runId,
+              );
+          }
+          return constants.SQLITE_OK;
+        });
+        try {
+          const before = read([run.requesterSessionKey]);
+          expect(moved).toBe(true);
+          expect(before.runs.get(run.runId)).toMatchObject({
+            requesterSessionKey: run.requesterSessionKey,
+            model: "original-model",
+          });
+          db.setAuthorizer(null);
+          expect(read([run.requesterSessionKey]).runs.size).toBe(0);
+          expect(read(["agent:main:other"]).runs.get(run.runId)?.model).toBe("replacement-model");
+        } finally {
+          db.setAuthorizer(null);
+          writer.close();
+        }
+      });
+    },
+  );
+
   it.each(["pending", "in_progress", "delivered", "failed", "suspended"] as const)(
     "preserves private %s handoffs across every current reader and restart",
     async (status) => {
@@ -200,6 +255,9 @@ describe("subagent registry sqlite store", () => {
           },
           delivery: { status },
         });
+        expect([
+          ...loadSubagentSessionListRunsFromSqlite(["agent:main:controller"]).values(),
+        ]).toMatchObject([{ runId: run.runId, delivery: { status } }]);
         const stateDb = getNodeSqliteKysely<SubagentRegistryDatabase>(database.db);
         const releasedRows = executeSqliteQuerySync(
           database.db,
@@ -723,6 +781,16 @@ describe("subagent registry sqlite store", () => {
           ?.controllerSessionKey,
       ).toBe("agent:main:controller");
       expect(loadSubagentRunsForControllerFromSqlite("   ")).toEqual([]);
+      expect([
+        ...loadSubagentSessionListRunsFromSqlite([" agent:main:controller ", " "]).keys(),
+      ]).toEqual(["empty-controller", "explicit", "fallback", "padded-controller"]);
+      expect([
+        ...loadSubagentSessionListRunsFromSqlite([
+          "agent:main:controller",
+          "agent:main:other-controller",
+        ]).keys(),
+      ]).toEqual(["empty-controller", "explicit", "fallback", "other", "padded-controller"]);
+      expect(loadSubagentSessionListRunsFromSqlite(["   "])).toEqual(new Map());
     });
   });
 

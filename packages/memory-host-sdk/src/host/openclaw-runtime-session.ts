@@ -9,8 +9,13 @@ import {
 
 export { readTranscriptStatsBatchReadOnlySync };
 export { readTranscriptExportSnapshotReadOnlySync };
+export {
+  listSessionEntriesCore,
+  listSessionEntriesReadOnly,
+} from "../../../../src/config/sessions/session-accessor.js";
 export { isIncognitoSessionKey } from "../../../../src/routing/session-key.js";
 export { isIncognitoOpenClawAgentSqlitePath } from "../../../../src/state/openclaw-agent-db.paths.js";
+export { cloneEnvWithPlatformSemantics } from "../../../../src/config/config-env-vars.js";
 
 /** Keep worker launch machinery behind the memory host's existing lazy runtime bridge. */
 export async function prepareSessionEntryInWorker(
@@ -55,7 +60,6 @@ export { resolveSessionTranscriptsDirForAgent } from "../../../../src/config/ses
 export type { SessionEntry } from "../../../../src/config/sessions/types.js";
 export { isExecCompletionEvent } from "../../../../src/infra/heartbeat-events-filter.js";
 export {
-  listSessionEntries,
   parseSqliteSessionFileMarker,
   readTranscriptStatsSync,
   resolveStorePath,

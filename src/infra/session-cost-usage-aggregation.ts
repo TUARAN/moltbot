@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs";
+import { toErrorObject } from "@openclaw/normalization-core/error-coercion";
+import type { Result } from "@openclaw/normalization-core/result";
 import { resolveAgentDir } from "../agents/agent-scope-config.js";
 import { parseSqliteSessionFileMarker } from "../config/sessions/legacy-sqlite-marker.js";
 import {
@@ -13,6 +15,7 @@ import {
 } from "../config/sessions/transcript-tree.js";
 import { selectVisibleTranscriptEvents } from "../config/sessions/transcript-visible-events.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import { prepareModelPricingContext } from "../model-catalog/pricing.js";
 import { normalizeAgentId } from "../routing/session-key.js";
 import { resolveOpenClawAgentSqlitePath } from "../state/openclaw-agent-db.js";
 import { resolveModelCostConfigFingerprint } from "../utils/usage-format.js";
@@ -43,6 +46,7 @@ import {
 } from "./session-cost-usage-rollup.js";
 import { createEmptyCostUsageTotals as emptyTotals } from "./session-cost-usage-totals.js";
 import type { CostUsageTotals, ParsedTranscriptEntry } from "./session-cost-usage.types.js";
+import { withSqliteWorkerCleanupFailure } from "./sqlite-worker-broker-reply.js";
 
 // Cache data is rebuildable. Semantic changes get a new version; old rows are
 // ignored and rebuilt instead of normalized through a runtime compatibility path.
@@ -97,10 +101,11 @@ export function resolveUsageCostAgentDir(
   return resolveAgentDir(config ?? {}, agentId);
 }
 
-export function resolveUsageCostPricingFingerprint(
+export async function resolveUsageCostPricingFingerprint(
   config?: OpenClawConfig,
   agentDir?: string,
-): string {
+): Promise<string> {
+  await prepareModelPricingContext(config);
   return resolveModelCostConfigFingerprint(config, agentDir);
 }
 
@@ -613,9 +618,10 @@ export async function refreshCostUsageCacheForAgent(params: {
   if (!lock.acquired) {
     return "busy";
   }
+  let result: Result<UsageCostRefreshResult, unknown>;
   try {
     const agentDir = params.agentDir ?? resolveUsageCostAgentDir(params.config, params.agentId);
-    const pricingFingerprint = resolveUsageCostPricingFingerprint(params.config, agentDir);
+    const pricingFingerprint = await resolveUsageCostPricingFingerprint(params.config, agentDir);
     const rows = readSessionCostUsageRollupRows(params.agentId, databasePath);
     const rawValues = new Map(rows.map((row) => [row.key, row.valueJson]));
     const rollups = readUsageCostRollups(params.agentId, pricingFingerprint, databasePath, {
@@ -686,8 +692,22 @@ export async function refreshCostUsageCacheForAgent(params: {
       rollups.set(file.filePath, { entry, valueJson });
       rawValues.set(file.filePath, valueJson);
     }
-    return "refreshed";
-  } finally {
-    await lock.release();
+    result = { ok: true, value: "refreshed" };
+  } catch (error) {
+    result = { ok: false, error };
   }
+  try {
+    await lock.release();
+  } catch (cleanupError) {
+    throw result.ok
+      ? cleanupError
+      : withSqliteWorkerCleanupFailure(
+          toErrorObject(result.error, "Usage cache refresh failed"),
+          toErrorObject(cleanupError, "Usage cache refresh lock release failed"),
+        );
+  }
+  if (!result.ok) {
+    throw result.error;
+  }
+  return result.value;
 }

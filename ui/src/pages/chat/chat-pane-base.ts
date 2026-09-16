@@ -46,6 +46,7 @@ import { SubscriptionsController } from "../../lit/subscriptions-controller.ts";
 import { ChatComposerCapabilityHost } from "./chat-composer-capability-host.ts";
 import {
   CHAT_PANE_LIFECYCLE_CHANGED_EVENT,
+  CHAT_RUN_ACTIVITY_CHANGED_EVENT,
   CHAT_TRANSCRIPT_LOADING_CHANGED_EVENT,
 } from "./chat-history-events.ts";
 import { getAcceptedChatHistorySession, getChatHistoryLoadState } from "./chat-history-state.ts";
@@ -70,6 +71,7 @@ import type { ChatPaneHeaderAction } from "./components/chat-pane-header.ts";
 import type { ChatSessionSharingState } from "./components/chat-session-sharing.ts";
 import { ChatTranscriptController } from "./components/chat-transcript-controller.ts";
 import type { SessionDiscussionPanelConfig } from "./components/session-discussion-panel.ts";
+import { hasDirectSessionRun } from "./run-lifecycle.ts";
 import { handleChatScrollTakeover } from "./scroll.ts";
 import type { ChatMessageCache } from "./session-message-cache.ts";
 import { resolveChatSnapshotKey } from "./session-snapshot-key.ts";
@@ -90,6 +92,8 @@ export abstract class ChatPaneBase extends OpenClawLightDomElement {
   // Disconnect releases the waiter so reconnect can schedule in its new lifecycle.
   private hiddenUpdateResume: (() => void) | undefined;
   private readonly handleVisibilityChange = () => {
+    // Lit parks hidden updates, but progress watches must follow visibility immediately.
+    this.progressCard.hostUpdate();
     if (document.visibilityState !== "hidden") {
       this.hiddenUpdateResume?.();
       return;
@@ -211,6 +215,7 @@ export abstract class ChatPaneBase extends OpenClawLightDomElement {
     const wasConversationPresented = this.conversationPresented;
     this.headerPresentationGeneration += 1;
     this.presentedValue = value;
+    this.progressCard.hostUpdate();
     this.requestUpdate("presented", previous);
     this.presentedChanged(value);
     this.notifyConversationPresentation(wasConversationPresented);
@@ -313,7 +318,32 @@ export abstract class ChatPaneBase extends OpenClawLightDomElement {
   @property({ attribute: false }) onClosePane?: (paneId: string) => void;
   @property({ attribute: false }) boardProvider?: BoardProvider;
 
-  protected readonly chatState = new ChatStateController<ChatPageHost>(this);
+  private publishedRunActivity: ChatPaneBase["runActivity"] = null;
+  protected readonly chatState = new ChatStateController<ChatPageHost>(this, () => {
+    const activity = this.runActivity;
+    if (
+      activity?.client === this.publishedRunActivity?.client &&
+      activity?.agentId === this.publishedRunActivity?.agentId &&
+      activity?.working === this.publishedRunActivity?.working &&
+      activity?.completion === this.publishedRunActivity?.completion
+    ) {
+      return;
+    }
+    this.publishedRunActivity = activity;
+    this.dispatchEvent(new Event(CHAT_RUN_ACTIVITY_CHANGED_EVENT, { bubbles: true }));
+  });
+
+  get runActivity() {
+    const state = this.state;
+    return state?.connected
+      ? {
+          client: state.client,
+          agentId: resolveChatAgentId(state),
+          working: hasDirectSessionRun(state),
+          completion: state.chatRunStatus,
+        }
+      : null;
+  }
   protected readonly composerCapabilities = new ChatComposerCapabilityHost(() =>
     this.requestUpdate(),
   );
@@ -326,7 +356,7 @@ export abstract class ChatPaneBase extends OpenClawLightDomElement {
     gateway: () => this.context?.gateway,
     target: () => {
       const state = this.state;
-      if (!state || this.isCurrentSessionArchived(state)) {
+      if (!state || this.isCurrentSessionArchived(state) || !this.secondarySessionReadsReady()) {
         return undefined;
       }
       return this.resolveChatReadTarget();
@@ -400,6 +430,8 @@ export abstract class ChatPaneBase extends OpenClawLightDomElement {
   @litState() protected resetConfirmationOpen = false;
   protected deferredSessionHydrationRequestVersion = 0;
   protected sessionCompanionHydrationKey = "";
+  protected sessionCompanionFocusGeneration = 0;
+  @litState() protected sessionCompanionFocusRequest?: () => boolean;
   protected readonly sessionCompanionThreads = new ChatSessionCompanionThreads(() => {
     this.requestUpdate();
   });
@@ -462,6 +494,43 @@ export abstract class ChatPaneBase extends OpenClawLightDomElement {
     this.setSessionObserverVisibility(true);
   }
 
+  protected async openSessionCompanion(pageState: ChatPageHost, question: string): Promise<void> {
+    const sessionKey = pageState.sessionKey;
+    const agentId = resolveChatAgentId(pageState);
+    const generation = this.connectionGeneration;
+    const focusGeneration = this.sessionCompanionFocusGeneration;
+    const composer = getChatComposerState(this.presentationId);
+    const editRevision = composer.editRevision;
+    const draft = pageState.chatMessage;
+    const ownsFocus = () =>
+      this.state === pageState &&
+      pageState.sessionKey === sessionKey &&
+      resolveChatAgentId(pageState) === agentId &&
+      this.connectionGeneration === generation &&
+      this.sessionCompanionFocusGeneration === focusGeneration &&
+      composer.editRevision === editRevision &&
+      pageState.chatMessage === draft &&
+      isSidebarSlotVisible(pageState.sidebarLayout, "companion") &&
+      (this.ownerDocument.activeElement === this.ownerDocument.body ||
+        this.contains(this.ownerDocument.activeElement)) &&
+      this.isConnected &&
+      this.active &&
+      this.presented;
+    // Consume even an invalidated request so a lazy mount cannot fall back to autofocus.
+    const requestFocus = () => {
+      if (this.sessionCompanionFocusRequest === requestFocus) {
+        this.sessionCompanionFocusRequest = undefined;
+      }
+      return ownsFocus();
+    };
+    // The first lazy mount and the completed answer share the same input intent.
+    this.sessionCompanionFocusRequest = requestFocus;
+    await this.submitSessionCompanionQuestion(question);
+    if (ownsFocus()) {
+      this.sessionCompanionFocusRequest = requestFocus;
+    }
+  }
+
   protected readonly submitSessionCompanionQuestion = async (question: string) => {
     const state = this.state;
     if (!state || !state.sessionKey) {
@@ -470,6 +539,9 @@ export abstract class ChatPaneBase extends OpenClawLightDomElement {
     const sessionKey = state.sessionKey;
     const agentId = resolveChatAgentId(state);
     this.requestSessionRail("open");
+    if (!question.trim()) {
+      return;
+    }
     if (!state.connected || !state.client) {
       this.sessionCompanionThreads.setDraft(sessionKey, question, agentId);
       return;
@@ -674,6 +746,7 @@ export abstract class ChatPaneBase extends OpenClawLightDomElement {
   ): boolean;
   protected abstract publishHeaderError(error: unknown, owner?: string): void;
   protected abstract probeSessionDiscussion(sessionKey: string): Promise<void>;
+  protected abstract secondarySessionReadsReady(explicit?: boolean): boolean;
   protected abstract loadHeaderPlatform(
     client: GatewayBrowserClient,
     generation: number,

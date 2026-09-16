@@ -74,12 +74,10 @@ export abstract class MemoryManagerSessionSyncOps extends MemoryManagerWatchOps 
     }
   }
 
-  protected async listSessionCorpusEntries(options?: {
-    includeContentRevision?: boolean;
-  }): Promise<SessionTranscriptCorpusEntry[]> {
+  protected async listSessionCorpusEntries(): Promise<SessionTranscriptCorpusEntry[]> {
     const readOnly = this.database.readOnly;
     const entries = await listSessionTranscriptCorpusEntriesForAgent(this.agentId, {
-      includeContentRevision: !readOnly && options?.includeContentRevision !== false,
+      includeContentRevision: false,
       readOnly,
     });
     const archivedSessions = new Map(
@@ -141,7 +139,7 @@ export abstract class MemoryManagerSessionSyncOps extends MemoryManagerWatchOps 
     }
     this.sessionUnsubscribe = this.subscribeSessionTranscriptUpdates((update) =>
       runInMemoryBackgroundContext(() => {
-        if (this.closed) {
+        if (this.closing || this.closed) {
           return;
         }
         const target = this.resolveSessionTranscriptUpdateSyncTarget(update);
@@ -150,7 +148,10 @@ export abstract class MemoryManagerSessionSyncOps extends MemoryManagerWatchOps 
           return;
         }
         if (update.sessionFile) {
-          void this.scheduleCorpusSessionFileDirty(update.sessionFile).catch((err: unknown) => {
+          const sessionFile = update.sessionFile;
+          void this.withManagerOperation(() =>
+            this.scheduleCorpusSessionFileDirty(sessionFile),
+          ).catch((err: unknown) => {
             log.warn(`memory session corpus update failed: ${String(err)}`);
           });
         }
@@ -166,7 +167,7 @@ export abstract class MemoryManagerSessionSyncOps extends MemoryManagerWatchOps 
 
   private async scheduleCorpusSessionFileDirty(sessionFile: string): Promise<void> {
     const resolvedSessionFile = path.resolve(sessionFile);
-    const corpusEntries = await this.listSessionCorpusEntries({ includeContentRevision: false });
+    const corpusEntries = await this.listSessionCorpusEntries();
     if (
       corpusEntries.some(
         (entry) =>
@@ -179,10 +180,11 @@ export abstract class MemoryManagerSessionSyncOps extends MemoryManagerWatchOps 
   }
 
   protected ensureSessionStartupCatchup(): void {
-    if (!this.sources.has("sessions")) {
+    if (!this.sources.has("sessions") || this.closing || this.closed) {
       return;
     }
-    void this.runSessionStartupCatchup().catch((err: unknown) => {
+    // Discovery can reopen the agent store after filesystem awaits; close must drain it.
+    void this.withManagerOperation(() => this.runSessionStartupCatchup()).catch((err: unknown) => {
       log.warn("memory session startup catch-up failed: " + String(err));
     });
   }
@@ -301,6 +303,9 @@ export abstract class MemoryManagerSessionSyncOps extends MemoryManagerWatchOps 
   }
 
   private scheduleSessionDirty(target: string | MemorySessionSyncTarget) {
+    if (this.closing || this.closed) {
+      return;
+    }
     if (typeof target === "string") {
       this.sessionPendingFiles.add(target);
     } else {
@@ -311,9 +316,14 @@ export abstract class MemoryManagerSessionSyncOps extends MemoryManagerWatchOps 
     }
     this.sessionWatchTimer = setTimeout(() => {
       this.sessionWatchTimer = null;
-      void this.processSessionUpdateBatch().catch((err: unknown) => {
-        log.warn(`memory session update failed: ${String(err)}`);
-      });
+      if (this.closing || this.closed) {
+        return;
+      }
+      void this.withManagerOperation(() => this.processSessionUpdateBatch()).catch(
+        (err: unknown) => {
+          log.warn(`memory session update failed: ${String(err)}`);
+        },
+      );
     }, SESSION_DIRTY_DEBOUNCE_MS);
   }
 

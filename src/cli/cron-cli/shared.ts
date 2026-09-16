@@ -371,20 +371,7 @@ export function parseCronStaggerMs(params: {
   return parsed;
 }
 
-export function parseCronToolsAllow(input: unknown): string[] | undefined {
-  const raw = Array.isArray(input)
-    ? input.map((value) => String(value)).join(" ")
-    : typeof input === "string"
-      ? input
-      : "";
-  const tools = raw
-    .split(/[,\s]+/u)
-    .map((tool) => normalizeOptionalString(tool))
-    .filter((tool): tool is string => Boolean(tool));
-  return tools.length > 0 ? tools : undefined;
-}
-
-export function parseCronFallbacks(input: unknown): string[] | undefined {
+export function parseCronStringList(input: unknown): string[] | undefined {
   if (input === undefined) {
     return undefined;
   }

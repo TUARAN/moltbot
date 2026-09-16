@@ -5,7 +5,10 @@ import path from "node:path";
 import { cliProcessTestFiles } from "./vitest.cli-process-paths.mjs";
 import { commandsLightTestFiles } from "./vitest.commands-light-paths.mjs";
 import { isDatabaseWorkerCoreTestFile } from "./vitest.database-worker-core-paths.mjs";
-import { gatewayPluginTestFiles } from "./vitest.gateway-server-paths.mjs";
+import {
+  gatewayDatabaseWorkerTestFiles,
+  gatewayPluginTestFiles,
+} from "./vitest.gateway-server-paths.mjs";
 import { pluginSdkLightTestFiles } from "./vitest.plugin-sdk-paths.mjs";
 import { isToolingIsolatedTestFile } from "./vitest.tooling-isolated-paths.mjs";
 import { boundaryTestFiles, bundledPluginDependentUnitTestFiles } from "./vitest.unit-paths.mjs";
@@ -100,7 +103,6 @@ export const forcedUnitFastTestFiles = [
   "src/entry.version-fast-path.test.ts",
   "src/entry.test.ts",
   "src/flows/doctor-startup-channel-maintenance.test.ts",
-  "src/flows/search-setup.test.ts",
   "src/image-generation/openai-compatible-image-provider.test.ts",
   "src/install-sh-version.test.ts",
   "src/logger.test.ts",
@@ -117,14 +119,11 @@ export const forcedUnitFastTestFiles = [
   "src/proxy-capture/store.sqlite.test.ts",
   "src/talk/agent-consult-runtime.test.ts",
   "src/security/audit-config-basics.test.ts",
-  "src/security/audit-config-symlink.test.ts",
   "src/security/audit-exec-surface.test.ts",
   "src/security/audit-extra.sync.test.ts",
-  "src/security/audit-filesystem-windows.test.ts",
   "src/security/audit-sandbox-docker-config.test.ts",
   "src/security/audit-sandbox-browser.test.ts",
   "src/security/audit-extra.async.test.ts",
-  "src/security/audit-plugins-trust.test.ts",
   "src/security/audit-plugin-readonly-scope.test.ts",
   "src/skills/security/workspace-audit.test.ts",
   "src/security/fix.test.ts",
@@ -184,6 +183,7 @@ const ownerRoutedUnitTestPatterns = [
   "src/auto-reply/reply/dispatch-from-config.test.ts",
   "src/auto-reply/reply/dispatch-from-config.delivery.test.ts",
   "src/auto-reply/reply/dispatch-from-config.lifecycle.test.ts",
+  "src/auto-reply/reply/dispatch-from-config.tts-stream.test.ts",
 ];
 const broadUnitFastCandidateSkipGlobs = [
   "**/*.e2e.test.ts",
@@ -508,7 +508,7 @@ function analyzeUnitFastTestFile(cwd, file) {
   }
 
   let analysis;
-  if (isDatabaseWorkerCoreTestFile(file)) {
+  if (isDatabaseWorkerCoreTestFile(file) || gatewayDatabaseWorkerTestFiles.includes(file)) {
     analysis = { file, unitFast: false, reasons: ["database-worker-owner"] };
   } else if (isToolingIsolatedTestFile(file)) {
     // Explicit project ownership wins over inferred eligibility so full-suite

@@ -650,8 +650,16 @@ describe("buildAgentSystemPrompt", () => {
       capabilityToolNames: [],
       codeModeActive: true,
     },
-    { name: "minimal", toolNames: ["show_widget", "dashboard", "portal"], promptMode: "minimal" },
-    { name: "none", toolNames: ["show_widget", "dashboard", "portal"], promptMode: "none" },
+    {
+      name: "minimal",
+      toolNames: ["screen", "show_widget", "dashboard", "portal"],
+      promptMode: "minimal",
+    },
+    {
+      name: "none",
+      toolNames: ["screen", "show_widget", "dashboard", "portal"],
+      promptMode: "none",
+    },
   ] satisfies Array<{ name: string } & Partial<Parameters<typeof buildAgentSystemPrompt>[0]>>)(
     "omits UI presentation guidance when $name",
     (surface) => {
@@ -748,20 +756,41 @@ describe("buildAgentSystemPrompt", () => {
     expect(withYield).toContain("Wait with `sessions_yield`");
   });
 
-  it("limits screen guidance to web/app tool surfaces", () => {
+  it.each([
+    { name: "screen only", toolNames: ["screen"] },
+    { name: "direct", toolNames: ["screen", "browser", "dashboard", "show_widget"] },
+    {
+      name: "Code Mode",
+      toolNames: ["exec", "wait"],
+      capabilityToolNames: ["screen", "browser", "dashboard", "show_widget"],
+      codeModeActive: true,
+    },
+  ])("routes browser sidebar requests through screen for $name tools", (surface) => {
     const withoutScreen = buildAgentSystemPrompt({
       workspaceDir: "/tmp/openclaw",
-      toolNames: ["sessions"],
+      toolNames: ["sessions", "browser", "dashboard", "show_widget"],
     });
     const withScreen = buildAgentSystemPrompt({
       workspaceDir: "/tmp/openclaw",
-      toolNames: ["sessions", "screen"],
+      ...surface,
     });
 
     expect(withoutScreen).not.toContain("web/app turn may drive UI");
-    expect(withScreen).toContain("- screen: Drive operator web UI");
-    expect(withScreen).toContain(
-      "`screen` present: web/app turn may drive UI; messaging turn: don't.",
+    expect(withoutScreen).not.toContain('action="browser_show"');
+    if (surface.toolNames.includes("screen")) {
+      expect(withScreen).toContain("- screen: Drive operator web UI");
+      expect(withScreen).toContain(
+        "`screen` present: web/app turn may drive UI; messaging turn: don't.",
+      );
+    }
+    const presentation = withScreen.split("## UI Presentation\n")[1]?.split("\n## ")[0] ?? "";
+    expect(presentation).toContain('screen(action="browser_show")');
+    expect(presentation).toContain("browser sidebar");
+    expect(presentation).toContain("side panel");
+    expect(presentation).toContain("sidebar_show/sidebar_hide control the session list");
+    expect(presentation).toContain("Do not create or expand a dashboard to open a panel");
+    expect(withScreen.indexOf("## UI Presentation")).toBeGreaterThan(
+      withScreen.indexOf(SYSTEM_PROMPT_CACHE_BOUNDARY),
     );
   });
 
@@ -1682,6 +1711,26 @@ describe("buildAgentSystemPrompt", () => {
     );
     expect(prompt).toContain(`final ONLY ${SILENT_REPLY_TOKEN}`);
   });
+
+  it.each([false, true])(
+    "scopes channel routing without blocking external-service CLIs (message=%s)",
+    (messageAvailable) => {
+      const prompt = buildAgentSystemPrompt({
+        workspaceDir: "/tmp/openclaw",
+        toolNames: messageAvailable ? ["exec", "message"] : ["exec"],
+        runtimeInfo: { channel: "discord" },
+      });
+
+      expect(prompt).toContain(
+        "OpenClaw channel replies/actions: use OpenClaw routing, not exec/curl.",
+      );
+      expect(prompt).toContain(
+        "Other services (e.g. email): user-authorized CLI/API use is allowed",
+      );
+      expect(prompt).toContain("normal tool permissions and approvals still apply");
+      expect(prompt).not.toContain("Provider messaging: never exec/curl");
+    },
+  );
 
   it("keeps model-visible channel ids stable across external registration order", () => {
     const activeRegistry = captureActivePluginRegistrySnapshot();

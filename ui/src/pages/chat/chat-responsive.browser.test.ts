@@ -278,8 +278,11 @@ function readUiCss(): string {
     "ui/src/styles/layout.css",
     "ui/src/styles/layout.mobile.css",
     "ui/src/styles/components.css",
+    "ui/src/styles/rail-header.css",
+    "ui/src/styles/chat/startup-layout.css",
     "ui/src/styles/chat/layout.css",
     "ui/src/styles/chat/message-layout.css",
+    "ui/src/styles/chat/composer-surface.css",
     "ui/src/styles/chat/composer.css",
     "ui/src/styles/chat/composer-queue.css",
     "ui/src/styles/chat/progress-card.css",
@@ -291,6 +294,7 @@ function readUiCss(): string {
     "ui/src/styles/chat/question-card.css",
     "ui/src/styles/rail-header.css",
     "ui/src/styles/chat/sidebar.css",
+    "ui/src/styles/chat/session-rail.css",
     "ui/src/styles/chat/side-panel.css",
   ];
   cachedUiCss = files.map((file) => readStyleSheet(file)).join("\n");
@@ -438,7 +442,7 @@ function activityAlignmentHtml() {
   `;
 }
 
-function completedWorkSpacingHtml() {
+function completedWorkSpacingHtml(activity: boolean) {
   return `
     <div class="chat-thread" role="log">
       <div class="chat-thread-inner chat-thread-inner--virtual">
@@ -453,15 +457,15 @@ function completedWorkSpacingHtml() {
               </div>
             </div>
             <div class="chat-virtual-row" data-spacing-row="work">
-              <div class="chat-group tool chat-group--work">
+              <div class="chat-group tool ${activity ? "chat-group--activity chat-group--with-footer" : "chat-group--work"}">
                 <div class="chat-group-messages">
-                  <div class="chat-activity-group chat-work-group">
+                  <div class="chat-activity-group ${activity ? "" : "chat-work-group"}">
                     <button class="chat-inline-disclosure chat-activity-group__summary" type="button">
                       <span class="chat-tool-disclosure__content">
                         <span class="chat-activity-group__label">Worked for 10s</span>
                       </span>
                     </button>
-                    <div class="chat-work-group__separator"></div>
+                    ${activity ? "" : '<div class="chat-work-group__separator"></div>'}
                   </div>
                 </div>
               </div>
@@ -498,10 +502,12 @@ function runBlockSpacingHtml() {
                 </div>
               </div>
             </div>
+            <div class="chat-bubble" data-run-block="activity-reply"><div class="chat-text">Activity result</div></div>
             <div class="chat-activity-group chat-work-group" data-run-block="work">
               <button class="chat-inline-disclosure chat-activity-group__summary" type="button">Worked for 10s</button>
               <div class="chat-work-group__separator"></div>
             </div>
+            <div class="chat-bubble" data-run-block="reply"><div class="chat-text">Final reply</div></div>
           </div>
           <div class="chat-group-footer">
             <span class="chat-sender-name">Assistant</span>
@@ -1526,39 +1532,44 @@ describeBrowserLayout.concurrent("chat responsive browser layout", () => {
   });
 
   it.each([
-    { label: "desktop", width: 1366, hasTouch: false, expectedGap: 9 },
-    { label: "narrow touch", width: 430, hasTouch: true, expectedGap: 23 },
-    { label: "wide touch", width: 1366, hasTouch: true, expectedGap: 23 },
-  ])("balances completed-work spacing on $label", async ({ width, hasTouch, expectedGap }) => {
-    await withBrowserPage(
-      openBrowserPage(width, 720, { hasTouch, isolated: true }),
-      async (page) => {
-        // Isolate the final-layout contract from the 200ms settle-in transform.
-        await page.setContent(
-          `<!doctype html><html><head><style>${readUiCss()}</style><style>.chat-group--work { animation: none; }</style></head><body>${completedWorkSpacingHtml()}</body></html>`,
-        );
-        await waitForLayoutSettled(page, "[data-spacing-row], .chat-group--work");
+    { label: "desktop work", width: 1366, hasTouch: false, activity: false },
+    { label: "narrow touch work", width: 430, hasTouch: true, activity: false },
+    { label: "wide touch work", width: 1366, hasTouch: true, activity: false },
+    { label: "desktop activity", width: 1366, hasTouch: false, activity: true },
+    { label: "touch activity", width: 430, hasTouch: true, activity: true },
+  ])(
+    "keeps completed work attached to its reply on $label",
+    async ({ width, hasTouch, activity }) => {
+      await withBrowserPage(
+        openBrowserPage(width, 720, { hasTouch, isolated: true }),
+        async (page) => {
+          // Isolate the final-layout contract from the 200ms settle-in transform.
+          await page.setContent(
+            `<!doctype html><html><head><style>${readUiCss()}</style><style>.chat-group--work { animation: none; }</style></head><body>${completedWorkSpacingHtml(activity)}</body></html>`,
+          );
+          await waitForLayoutSettled(page, "[data-spacing-row], .chat-group--work");
 
-        const gaps = await page.evaluate(() => {
-          const prompt = document.querySelector<HTMLElement>(
-            '[data-spacing-row="prompt"] .chat-group',
-          )!;
-          const summary = document.querySelector<HTMLElement>(".chat-work-group > button")!;
-          const separator = document.querySelector<HTMLElement>(".chat-work-group__separator")!;
-          const reply = document.querySelector<HTMLElement>(
-            '[data-spacing-row="reply"] .chat-group',
-          )!;
-          return {
-            after: reply.getBoundingClientRect().top - separator.getBoundingClientRect().bottom,
-            before: summary.getBoundingClientRect().top - prompt.getBoundingClientRect().bottom,
-          };
-        });
+          const gaps = await page.evaluate(() => {
+            const prompt = document.querySelector<HTMLElement>(
+              '[data-spacing-row="prompt"] .chat-group',
+            )!;
+            const summary = document.querySelector<HTMLElement>(".chat-activity-group > button")!;
+            const work = document.querySelector<HTMLElement>(".chat-activity-group")!;
+            const reply = document.querySelector<HTMLElement>(
+              '[data-spacing-row="reply"] .chat-group',
+            )!;
+            return {
+              after: reply.getBoundingClientRect().top - work.getBoundingClientRect().bottom,
+              before: summary.getBoundingClientRect().top - prompt.getBoundingClientRect().bottom,
+            };
+          });
 
-        expect(gaps.before).toBeCloseTo(expectedGap, 0);
-        expect(gaps.after).toBeCloseTo(expectedGap, 0);
-      },
-    );
-  });
+          expect(gaps.before).toBeCloseTo(0, 0);
+          expect(gaps.after).toBeCloseTo(8, 0);
+        },
+      );
+    },
+  );
 
   it.each([
     { label: "desktop", width: 1366, hasTouch: false },
@@ -1579,13 +1590,15 @@ describeBrowserLayout.concurrent("chat responsive browser layout", () => {
             intraTurn: gap('[data-run-block="text"]', '[data-run-block="detail"]'),
             textToTool: gap('[data-run-block="detail"]', '[data-run-block="tool"]'),
             toolToList: gap('[data-run-block="tool"]', '[data-run-block="list"]'),
-            listToWork: gap('[data-run-block="list"]', '[data-run-block="work"]'),
+            listToReply: gap('[data-run-block="list"]', '[data-run-block="activity-reply"]'),
+            replyToWork: gap('[data-run-block="activity-reply"]', '[data-run-block="work"]'),
+            workToReply: gap('[data-run-block="work"]', '[data-run-block="reply"]'),
             expandedTextToTool: gap('[data-expanded-row="text"]', '[data-expanded-row="tool"]'),
             workedForSeparator: gap(
               '[data-run-block="work"] > button',
               ".chat-work-group__separator",
             ),
-            turn: gap('[data-run-block="work"]', "[data-next-turn] .chat-bubble"),
+            turn: gap('[data-run-block="reply"]', "[data-next-turn] .chat-bubble"),
             persistentTurn: gap(
               "[data-persistent-turn] .chat-bubble",
               "[data-after-persistent-turn] .chat-bubble",
@@ -1603,15 +1616,17 @@ describeBrowserLayout.concurrent("chat responsive browser layout", () => {
 
         expect(gaps).toEqual({
           intraTurn: 2,
-          textToTool: 12,
-          toolToList: 12,
-          listToWork: 12,
+          textToTool: 8,
+          toolToList: 8,
+          listToReply: 8,
+          replyToWork: 8,
+          workToReply: 8,
           expandedTextToTool: 6,
           workedForSeparator: 0,
-          turn: 50,
-          persistentTurn: 50,
-          revealedPersistentTurn: 50,
-          simpleToPersistentTurn: 50,
+          turn: hasTouch ? 50 : 28,
+          persistentTurn: hasTouch ? 30 : 28,
+          revealedPersistentTurn: hasTouch ? 50 : 28,
+          simpleToPersistentTurn: hasTouch ? 30 : 28,
         });
       },
     );

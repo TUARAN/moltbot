@@ -45,6 +45,11 @@ export function historicalV15AgentSchemaSql(): string {
     "\n-- Accepted input stays outside the active transcript until its exact turn owns execution.",
   );
   let sql = restoreHistoricalAgentLeaseSchema(withoutPendingInputs)
+    .replace(
+      "-- Legacy ACP provenance is private import evidence carried with its logical session.\n",
+      "",
+    )
+    .replace("  legacy_acp_migration_json TEXT,\n", "")
     .replace("  entry_valid INTEGER NOT NULL DEFAULT 0 CHECK (entry_valid IN (-1, 0, 1)),\n", "")
     .replace("  project_id TEXT,\n", "")
     .replace("  route_context_json TEXT,\n", "")
@@ -57,6 +62,11 @@ export function historicalV15AgentSchemaSql(): string {
       "  owner_actor_type TEXT,\n  owner_actor_id TEXT,\n  owner_assigned_by_type TEXT,\n  owner_assigned_by_id TEXT,\n  owner_assigned_at INTEGER,\n",
       "",
     );
+  sql = removeSchemaRange(
+    sql,
+    "CREATE INDEX IF NOT EXISTS idx_agent_session_nodes_label",
+    "CREATE INDEX IF NOT EXISTS idx_agent_session_nodes_parent_session_key",
+  );
   sql = removeSchemaRange(
     sql,
     "CREATE TABLE IF NOT EXISTS session_progress_cards (",

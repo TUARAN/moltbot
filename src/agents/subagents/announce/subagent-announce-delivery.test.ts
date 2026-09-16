@@ -2,7 +2,7 @@
 // runs report progress or completion back to the requester session.
 import fs from "node:fs";
 import path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { validateAgentParams } from "../../../../packages/gateway-protocol/src/index.js";
 import { formatValidationErrors } from "../../../../packages/gateway-protocol/src/validation-errors.js";
 import { useAutoCleanupTempDirTracker } from "../../../../test/helpers/temp-dir.js";
@@ -27,6 +27,8 @@ import {
 import { sendMessage as runtimeSendMessage } from "../../../infra/outbound/message.js";
 import { setActivePluginRegistry } from "../../../plugins/runtime.js";
 import { createDeferredCore } from "../../../shared/deferred.js";
+import { captureOpenClawStateWorkerContext } from "../../../state/openclaw-state-worker-context.js";
+import type { OpenClawStateWorkerContext } from "../../../state/openclaw-state-worker-context.types.js";
 import {
   createChannelTestPluginBase,
   createTestRegistry,
@@ -57,26 +59,54 @@ import {
 import { runDescendantWake } from "./subagent-announce-descendant-wake.js";
 
 const sessionDeliveryQueueMocks = vi.hoisted(() => ({
-  enqueueClaimedSessionDelivery: vi.fn((_payload: unknown, _leaseMs: number) => ({
-    id: "session-delivery-media",
-    claimed: true,
-    status: "pending" as "pending" | "failed" | "completed" | "unknown",
-  })),
+  enqueueClaimedSessionDelivery: vi.fn(
+    (_payload: unknown, _leaseMs: number, _queueContext: OpenClawStateWorkerContext) => ({
+      id: "session-delivery-media",
+      claimed: true,
+      status: "pending" as "pending" | "failed" | "completed" | "unknown",
+    }),
+  ),
   releaseSessionDeliveryClaim: vi.fn(async () => {}),
   scheduleSessionDelivery: vi.fn(async () => true),
 }));
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+let fixtureQueueContext: OpenClawStateWorkerContext;
+
+beforeEach(() => {
+  fixtureQueueContext = captureOpenClawStateWorkerContext();
+});
+
+function expectQueueContext() {
+  const queuedContext =
+    sessionDeliveryQueueMocks.enqueueClaimedSessionDelivery.mock.calls.at(-1)?.[2];
+  if (!queuedContext) {
+    throw new Error("Expected the durable handoff to capture its queue context");
+  }
+  return expect.objectContaining({
+    environment: fixtureQueueContext.environment,
+    admission: expect.objectContaining({
+      databasePath: fixtureQueueContext.admission.databasePath,
+      identity: queuedContext.admission.identity,
+    }),
+  });
+}
 
 vi.mock("../completion/subagent-completion-delivery.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../completion/subagent-completion-delivery.js")>()),
   admitCorrelatedSubagentSessionDelivery: (params: { payload: Record<string, unknown> }) =>
-    sessionDeliveryQueueMocks.enqueueClaimedSessionDelivery(params.payload, 125_000),
+    sessionDeliveryQueueMocks.enqueueClaimedSessionDelivery(
+      params.payload,
+      125_000,
+      captureOpenClawStateWorkerContext(),
+    ),
 }));
 
 vi.mock("../../../infra/session-delivery-queue-storage.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../infra/session-delivery-queue-storage.js")>()),
-  enqueueClaimedSessionDelivery: sessionDeliveryQueueMocks.enqueueClaimedSessionDelivery,
+  enqueueClaimedSessionDelivery: async (
+    ...args: Parameters<typeof sessionDeliveryQueueMocks.enqueueClaimedSessionDelivery>
+  ) => sessionDeliveryQueueMocks.enqueueClaimedSessionDelivery(...args),
   releaseSessionDeliveryClaim: sessionDeliveryQueueMocks.releaseSessionDeliveryClaim,
 }));
 
@@ -499,7 +529,6 @@ async function deliverSlackThreadAnnouncement(params: {
     targetRequesterSessionKey: "agent:main:slack:channel:C123:thread:171.222",
     triggerMessage: "child done",
     steerMessage: "child done",
-    requesterOrigin: slackThreadOrigin,
     requesterSessionOrigin: slackThreadOrigin,
     completionDirectOrigin: slackThreadOrigin,
     directOrigin: slackThreadOrigin,
@@ -561,7 +590,6 @@ async function deliverDiscordDirectMessageCompletion(params: {
     targetRequesterSessionKey: requesterSessionKey,
     triggerMessage: "child done",
     steerMessage: "child done",
-    requesterOrigin: origin,
     requesterSessionOrigin: origin,
     completionDirectOrigin: origin,
     directOrigin: origin,
@@ -633,7 +661,6 @@ async function deliverTelegramDirectMessageCompletion(params: {
     targetRequesterSessionKey: requesterSessionKey,
     triggerMessage: "child done",
     steerMessage: "child done",
-    requesterOrigin: origin,
     requesterSessionOrigin: origin,
     completionDirectOrigin: origin,
     directOrigin: origin,
@@ -707,7 +734,6 @@ async function deliverSlackChannelAnnouncement(params: {
     targetRequesterSessionKey: params.requesterSessionKey ?? "agent:main:slack:channel:C123",
     triggerMessage: "child done",
     steerMessage: "child done",
-    requesterOrigin: params.requesterOrigin ?? origin,
     requesterSessionOrigin: params.requesterOrigin ?? origin,
     completionDirectOrigin: params.completionDirectOrigin ?? params.requesterOrigin ?? origin,
     directOrigin: params.requesterOrigin ?? origin,
@@ -797,7 +823,7 @@ describe("deliverSubagentAnnouncement active requester steering", () => {
       targetRequesterSessionKey: "agent:eng:paperclip:issue:123",
       triggerMessage: "child done",
       steerMessage: "child done",
-      requesterOrigin: params.requesterOrigin,
+      requesterSessionOrigin: params.requesterOrigin,
       requesterIsSubagent: false,
       expectsCompletionMessage: false,
       directIdempotencyKey: "announce-no-external-route",
@@ -1142,11 +1168,6 @@ describe("deliverSubagentAnnouncement active requester steering", () => {
       targetRequesterSessionKey: "agent:eng:paperclip:issue:123",
       triggerMessage: "child done",
       steerMessage: "child done",
-      requesterOrigin: {
-        channel: "slack",
-        to: "channel:C123",
-        accountId: "acct-1",
-      },
       requesterIsSubagent: false,
       expectsCompletionMessage: false,
       directIdempotencyKey: "announce-no-external-route",
@@ -1357,7 +1378,6 @@ describe("deliverSubagentAnnouncement active requester steering", () => {
         targetRequesterSessionKey: "agent:eng:paperclip:issue:123",
         triggerMessage: "child done",
         steerMessage: "child done",
-        ...(fallsBack ? { requesterOrigin: slackThreadOrigin } : {}),
         requesterIsSubagent: false,
         expectsCompletionMessage: false,
         directIdempotencyKey,
@@ -2256,81 +2276,85 @@ describe("deliverSubagentAnnouncement completion delivery", () => {
     );
   });
 
-  it("delivers dormant child completion under restrictive gateway roles", async () => {
-    const callGateway = createGatewayMock();
-    const { cfg, dispatchGatewayMethodInProcess } = createRoleRestrictedInProcessGatewayMock({
-      result: {
-        deliveryStatus: sentDeliveryStatus,
-        payloads: [{ text: "requester voice completion" }],
-        meta: { finalAssistantVisibleText: "requester voice completion" },
-      },
-    });
-    testing.setDepsForTest({
-      callGateway,
-      dispatchGatewayMethodInProcess,
-      getRequesterSessionActivity: () => ({
-        sessionId: "requester-session-local",
-        isActive: false,
-      }),
-      getRuntimeConfig: () => cfg,
-    });
+  it.each([undefined, 0, 600])(
+    "delivers dormant child completion with requester budget %s under restrictive gateway roles",
+    async (requesterRunTimeoutSeconds) => {
+      const callGateway = createGatewayMock();
+      const { cfg, dispatchGatewayMethodInProcess } = createRoleRestrictedInProcessGatewayMock({
+        result: {
+          deliveryStatus: sentDeliveryStatus,
+          payloads: [{ text: "requester voice completion" }],
+          meta: { finalAssistantVisibleText: "requester voice completion" },
+        },
+      });
+      testing.setDepsForTest({
+        callGateway,
+        dispatchGatewayMethodInProcess,
+        getRequesterSessionActivity: () => ({
+          sessionId: "requester-session-local",
+          isActive: false,
+        }),
+        getRuntimeConfig: () => cfg,
+      });
 
-    const ownerContext = { owner: "gateway-a" } as never;
-    const resolveGatewayContext = () => ownerContext;
-    const signal = new AbortController().signal;
-    const result = await deliverSubagentAnnouncement({
-      requesterSessionKey: "agent:main:slack:channel:C123:thread:171.222",
-      targetRequesterSessionKey: "agent:main:slack:channel:C123:thread:171.222",
-      triggerMessage: "child done",
-      steerMessage: "child done",
-      requesterOrigin: slackThreadOrigin,
-      requesterSessionOrigin: slackThreadOrigin,
-      completionDirectOrigin: slackThreadOrigin,
-      directOrigin: slackThreadOrigin,
-      sourceSessionKey: "agent:main:subagent:child",
-      internalEvents: taskCompletionEvents({
-        childSessionKey: "agent:main:subagent:child",
-        childSessionId: "child-session-local",
-      }),
-      requesterIsSubagent: false,
-      expectsCompletionMessage: true,
-      bestEffortDeliver: true,
-      directIdempotencyKey: "announce-local-dispatch",
-      resolveGatewayContext,
-      signal,
-    });
-
-    expectDeliveryPath(result, "direct");
-    expect(result).toMatchObject({
-      requesterVisibleFinalDelivered: true,
-      finalAssistantVisibleText: "requester voice completion",
-    });
-    expect(callGateway).not.toHaveBeenCalled();
-    expectInProcessAgentParams(dispatchGatewayMethodInProcess, {
-      deliver: true,
-      channel: "slack",
-      accountId: "acct-1",
-      to: "channel:C123",
-      threadId: "171.222",
-      bestEffortDeliver: true,
-    });
-    const dispatchOptions = mockCallArg(dispatchGatewayMethodInProcess, 0, 2);
-    expect(dispatchOptions).toMatchObject({
-      cancelOnDeadline: true,
-      expectFinal: true,
-      forceSyntheticClient: true,
-      operatorRoleActor: { kind: "system" },
-      delegatedToolPolicyHandoff: {
+      const ownerContext = { owner: "gateway-a" } as never;
+      const resolveGatewayContext = () => ownerContext;
+      const signal = new AbortController().signal;
+      const result = await deliverSubagentAnnouncement({
+        requesterSessionKey: "agent:main:slack:channel:C123:thread:171.222",
+        targetRequesterSessionKey: "agent:main:slack:channel:C123:thread:171.222",
+        requesterRunTimeoutSeconds,
+        triggerMessage: "child done",
+        steerMessage: "child done",
+        requesterSessionOrigin: slackThreadOrigin,
+        completionDirectOrigin: slackThreadOrigin,
+        directOrigin: slackThreadOrigin,
         sourceSessionKey: "agent:main:subagent:child",
-        sourceSessionId: "child-session-local",
-        targetSessionKey: "agent:main:slack:channel:C123:thread:171.222",
-        targetSessionId: "requester-session-local",
-        idempotencyKey: "announce-local-dispatch",
-      },
-      resolveGatewayContext,
-      signal: expect.any(AbortSignal),
-    });
-  });
+        internalEvents: taskCompletionEvents({
+          childSessionKey: "agent:main:subagent:child",
+          childSessionId: "child-session-local",
+        }),
+        requesterIsSubagent: false,
+        expectsCompletionMessage: true,
+        bestEffortDeliver: true,
+        directIdempotencyKey: "announce-local-dispatch",
+        resolveGatewayContext,
+        signal,
+      });
+
+      expectDeliveryPath(result, "direct");
+      expect(result).toMatchObject({
+        requesterVisibleFinalDelivered: true,
+        finalAssistantVisibleText: "requester voice completion",
+      });
+      expect(callGateway).not.toHaveBeenCalled();
+      expectInProcessAgentParams(dispatchGatewayMethodInProcess, {
+        deliver: true,
+        timeout: requesterRunTimeoutSeconds,
+        channel: "slack",
+        accountId: "acct-1",
+        to: "channel:C123",
+        threadId: "171.222",
+        bestEffortDeliver: true,
+      });
+      const dispatchOptions = mockCallArg(dispatchGatewayMethodInProcess, 0, 2);
+      expect(dispatchOptions).toMatchObject({
+        cancelOnDeadline: true,
+        expectFinal: true,
+        forceSyntheticClient: true,
+        operatorRoleActor: { kind: "system" },
+        delegatedToolPolicyHandoff: {
+          sourceSessionKey: "agent:main:subagent:child",
+          sourceSessionId: "child-session-local",
+          targetSessionKey: "agent:main:slack:channel:C123:thread:171.222",
+          targetSessionId: "requester-session-local",
+          idempotencyKey: "announce-local-dispatch",
+        },
+        resolveGatewayContext,
+        signal: expect.any(AbortSignal),
+      });
+    },
+  );
 
   it("wakes settled descendant runs under restrictive gateway roles", async () => {
     const { cfg, dispatchGatewayMethodInProcess } = createRoleRestrictedInProcessGatewayMock({
@@ -2397,7 +2421,6 @@ describe("deliverSubagentAnnouncement completion delivery", () => {
       targetRequesterSessionKey: "agent:main:slack:channel:C123:thread:171.222",
       triggerMessage: "child done",
       steerMessage: "child done",
-      requesterOrigin: slackThreadOrigin,
       requesterSessionOrigin: slackThreadOrigin,
       completionDirectOrigin: slackThreadOrigin,
       directOrigin: slackThreadOrigin,
@@ -3417,12 +3440,15 @@ describe("deliverSubagentAnnouncement completion delivery", () => {
           idempotencyKey: "announce-dm-fallback-empty:agent-loop",
         }),
         expect.any(Number),
+        expectQueueContext(),
       );
       expect(sessionDeliveryQueueMocks.releaseSessionDeliveryClaim).toHaveBeenCalledWith(
         "session-delivery-media",
+        expectQueueContext(),
       );
       expect(sessionDeliveryQueueMocks.scheduleSessionDelivery).toHaveBeenCalledWith(
         "session-delivery-media",
+        expectQueueContext(),
       );
     },
   );
@@ -3622,7 +3648,7 @@ describe("deliverSubagentAnnouncement completion delivery", () => {
     expect(sendMessage).not.toHaveBeenCalled();
     const scheduleExpectation = expect(sessionDeliveryQueueMocks.scheduleSessionDelivery);
     if (schedulesRetry) {
-      scheduleExpectation.toHaveBeenCalledWith("session-delivery-media");
+      scheduleExpectation.toHaveBeenCalledWith("session-delivery-media", expectQueueContext());
     } else {
       scheduleExpectation.not.toHaveBeenCalled();
     }
@@ -3650,9 +3676,11 @@ describe("deliverSubagentAnnouncement completion delivery", () => {
     expect(callGateway).not.toHaveBeenCalled();
     expect(sessionDeliveryQueueMocks.releaseSessionDeliveryClaim).toHaveBeenCalledWith(
       "session-delivery-media",
+      expectQueueContext(),
     );
     expect(sessionDeliveryQueueMocks.scheduleSessionDelivery).toHaveBeenCalledWith(
       "session-delivery-media",
+      expectQueueContext(),
     );
   });
 
@@ -3694,6 +3722,7 @@ describe("deliverSubagentAnnouncement completion delivery", () => {
         expectedMediaUrls: ["/tmp/generated-corgi.mp4"],
       }),
       expect.any(Number),
+      expectQueueContext(),
     );
     expect(callGateway).not.toHaveBeenCalled();
     expect(sendMessage).not.toHaveBeenCalled();
@@ -3721,6 +3750,7 @@ describe("deliverSubagentAnnouncement completion delivery", () => {
     expect(sendMessage).not.toHaveBeenCalled();
     expect(sessionDeliveryQueueMocks.scheduleSessionDelivery).toHaveBeenCalledWith(
       "session-delivery-media",
+      expectQueueContext(),
     );
   });
 
@@ -3788,9 +3818,11 @@ describe("deliverSubagentAnnouncement completion delivery", () => {
         sourceReplyDeliveryMode: "automatic",
       }),
       expect.any(Number),
+      expectQueueContext(),
     );
     expect(sessionDeliveryQueueMocks.scheduleSessionDelivery).toHaveBeenCalledWith(
       "session-delivery-media",
+      expectQueueContext(),
     );
   });
 
@@ -3847,9 +3879,11 @@ describe("deliverSubagentAnnouncement completion delivery", () => {
         idempotencyKey: "announce-channel-media-handoff-locked:agent-loop",
       }),
       expect.any(Number),
+      expectQueueContext(),
     );
     expect(sessionDeliveryQueueMocks.scheduleSessionDelivery).toHaveBeenCalledWith(
       "session-delivery-media",
+      expectQueueContext(),
     );
   });
 
@@ -3876,6 +3910,7 @@ describe("deliverSubagentAnnouncement completion delivery", () => {
     expect(sendMessage).not.toHaveBeenCalled();
     expect(sessionDeliveryQueueMocks.scheduleSessionDelivery).toHaveBeenCalledWith(
       "session-delivery-media",
+      expectQueueContext(),
     );
   });
 
@@ -4162,8 +4197,42 @@ describe("deliverSubagentAnnouncement completion delivery", () => {
       path: "direct",
       reason: "message_tool_delivery_missing",
       error: "completion agent did not use the message tool for message-tool-only delivery",
+      disposition: "permanent_failure",
     });
+    expect(queueEmbeddedAgentMessageWithOutcome).not.toHaveBeenCalled();
+    expect(callGateway).toHaveBeenCalledTimes(1);
+    expect(result.phases?.map((phase) => phase.phase)).toEqual(["direct-primary"]);
   });
+
+  it.each(["accepted", "in_flight", "yielded"] as const)(
+    "does not replay a still-owned %s completion handoff",
+    async (state) => {
+      const callGateway = createGatewayMock(
+        state === "yielded"
+          ? { status: "ok", result: { payloads: [], meta: { yielded: true } } }
+          : { status: state },
+      );
+      const result = await deliverSlackChannelAnnouncement({
+        callGateway,
+        directIdempotencyKey: `announce-pending-message-tool-${state}`,
+        sourceTool: "subagent_announce",
+        runtimeConfig: { messages: { groupChat: { visibleReplies: "message_tool" } } },
+        internalEvents: taskCompletionEvents({ childSessionId: "child-session-id" }),
+      });
+      expectRecordFields(
+        result,
+        state === "yielded"
+          ? {
+              delivered: false,
+              reason: "completion_handoff_pending",
+              disposition: "session_queued",
+            }
+          : { delivered: true, path: "direct" },
+      );
+      expect(result.phases?.map((phase) => phase.phase)).toEqual(["direct-primary"]);
+      expect(callGateway).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it.each([
     {
@@ -4949,7 +5018,6 @@ describe("deliverSubagentAnnouncement completion delivery", () => {
     const result = await deliverSubagentAnnouncement({
       requesterSessionKey: "agent:main:announce-missing-destination",
       targetRequesterSessionKey: "agent:main:announce-missing-destination",
-      requesterOrigin: origin,
       requesterSessionOrigin: origin,
       directOrigin: origin,
       requesterIsSubagent: false,
@@ -5028,7 +5096,15 @@ describe("deliverSubagentAnnouncement completion delivery", () => {
     })),
     {
       name: "acknowledges a core-settled next wave without recording a visible final",
-      routes: requesterSettleRoutes,
+      routes: [
+        ...requesterSettleRoutes,
+        {
+          name: "Discord without a target",
+          sessionKey: "agent:main:requester-settle-without-target",
+          origin: { channel: "discord", accountId: "acct-1" },
+          agentParams: { deliver: false, channel: "discord", accountId: "acct-1", to: undefined },
+        },
+      ],
       response: {
         result: { payloads: [], meta: { yielded: true }, requesterContinuationSettled: true },
       },
@@ -5481,7 +5557,6 @@ describe("deliverSubagentAnnouncement completion delivery", () => {
       targetRequesterSessionKey: route.sessionKey,
       triggerMessage: "all spawned subagents settled",
       steerMessage: "all spawned subagents settled",
-      requesterOrigin: origin,
       requesterSessionOrigin: origin,
       directOrigin: origin,
       requesterIsSubagent: "requesterIsSubagent" in route && route.requesterIsSubagent === true,

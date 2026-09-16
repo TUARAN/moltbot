@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -15,7 +15,6 @@ import {
   hasQaSmokeAffectingChange,
   hasSqliteSessionLifecycleAffectingChange,
   hasUiE2eAffectingChange,
-  resolveChangedDockerSeedLanes,
 } from "../../scripts/lib/ci-changed-node-test-plan.mts";
 import { encodeNodeTestGroups } from "../../scripts/lib/ci-node-test-groups-codec.mts";
 import {
@@ -169,87 +168,6 @@ function expectAllExtensionConfigs(
   expect(configs).toEqual(expectedConfigs);
   expect(configs).toContain("test/vitest/vitest.extension-codex.config.ts");
 }
-
-const allDockerSeedLanes = ["mcp-channels", "cron-mcp-cleanup", "mcp-code-mode-gateway"];
-it.each([
-  [["scripts/e2e/mcp-channels-seed.ts"], ["mcp-channels"]],
-  [["scripts/e2e/cron-mcp-cleanup-seed.ts"], ["cron-mcp-cleanup"]],
-  [["scripts/e2e/mcp-code-mode-gateway-seed.ts"], ["mcp-code-mode-gateway"]],
-  [["scripts/e2e/lib/mcp-code-mode-probe-server.ts"], ["mcp-code-mode-gateway"]],
-  [["scripts/e2e/lib/mcp-code-mode/scenario.sh"], ["mcp-code-mode-gateway"]],
-  [["scripts/e2e/update-channel-switch-docker.sh"], ["update-channel-switch"]],
-  [["scripts/e2e/fleet-cache-docker.sh"], ["fleet-cache"]],
-  [["scripts/e2e/lib/fleet-cache/assert-cell.mjs"], ["fleet-cache"]],
-  [["scripts/e2e/lib/fleet-cache/podman-control.sh"], ["fleet-cache"]],
-  [["scripts/e2e/lib/fleet-cache/prepare-podman-storage.mjs"], ["fleet-cache"]],
-  [["scripts\\e2e\\lib\\fleet-cache\\probe-podman-cell.mjs"], ["fleet-cache"]],
-  [["scripts/e2e/lib/fleet-cache-unrelated/probe.mjs"], []],
-  [["scripts/e2e/lib/update-channel-switch/assertions.mjs"], ["update-channel-switch"]],
-  [
-    [
-      "scripts/e2e/update-channel-switch-docker.sh",
-      "scripts/e2e/lib/update-channel-switch/assertions.mjs",
-      "scripts/e2e/mcp-channels-seed.ts",
-    ],
-    ["mcp-channels", "update-channel-switch"],
-  ],
-  [["scripts/e2e/docker-openai-seed.ts"], allDockerSeedLanes],
-  [
-    [
-      "scripts/e2e/mcp-code-mode-gateway-seed.ts",
-      "scripts/e2e/mcp-channels-seed.ts",
-      "scripts/e2e/lib/mcp-code-mode-probe-server.ts",
-      "scripts/e2e/cron-mcp-cleanup-seed.ts",
-    ],
-    allDockerSeedLanes,
-  ],
-  [[".github/workflows/ci.yml"], [...allDockerSeedLanes, "published-upgrade-survivor"]],
-  [
-    ["scripts/lib/ci-changed-node-test-plan.mts"],
-    [...allDockerSeedLanes, "published-upgrade-survivor"],
-  ],
-  [["scripts\\e2e\\lib\\mcp-code-mode-probe-server.ts"], ["mcp-code-mode-gateway"]],
-  [["scripts\\e2e\\lib\\mcp-code-mode\\scenario.sh"], ["mcp-code-mode-gateway"]],
-  [["scripts/e2e/install-e2e.ts", "docs/ci.md"], []],
-  [["src/commands/doctor-config-preflight.admission.process.test.ts"], []],
-  [["src/commands/doctor-config-runtime.test-support.ts"], []],
-  [["src\\commands\\doctor-config-runtime.test-support.ts"], []],
-  [["src/state/openclaw-state-db-contract.test.ts"], []],
-  [
-    ["src/commands/doctor-config-runtime.test-support.ts", "src/commands/doctor.ts"],
-    ["published-upgrade-survivor"],
-  ],
-  [["src\\state\\openclaw-state-db-contract.ts"], ["published-upgrade-survivor"]],
-  [["scripts/e2e/lib/upgrade-survivor/test-support.ts"], ["published-upgrade-survivor"]],
-  ...[
-    "src/cli/update-cli/run-update.ts",
-    "src/infra/update-runner.ts",
-    "src/infra/package-update-global.ts",
-    "src/plugins/update.ts",
-    "src/plugins/update-internal.ts",
-    "src/commands/doctor.ts",
-    "src/commands/doctor-state.ts",
-    "src/commands/doctor/migrations/example.ts",
-    "src/state/new-state-migration.ts",
-    "scripts/e2e/upgrade-survivor-docker.sh",
-    "scripts/e2e/lib/upgrade-survivor/assertions.mjs",
-    "scripts/lib/docker-e2e-plan.mts",
-    "scripts/lib/docker-e2e-scenarios.mts",
-    "scripts/resolve-upgrade-survivor-baselines.mts",
-    "package.json",
-  ].map((owner) => [[owner], ["published-upgrade-survivor"]]),
-])("resolves Docker seed lanes for %j", (changedPaths, expected) => {
-  expect(resolveChangedDockerSeedLanes(changedPaths)).toEqual(expected);
-});
-
-it.each([
-  ["src/state/openclaw-state-db-contract.ts", "OPENCLAW_STATE_SCHEMA_VERSION"],
-  ["src/state/openclaw-agent-db-contract.ts", "OPENCLAW_AGENT_SCHEMA_VERSION"],
-])("always gates schema-version changes in %s with a published upgrade", (owner, constant) => {
-  // A moved constant must update this independent owner guarantee, not silently lose the gate.
-  expect(readFileSync(owner, "utf8")).toMatch(new RegExp(`export const ${constant} = \\d+;`));
-  expect(resolveChangedDockerSeedLanes([owner])).toEqual(["published-upgrade-survivor"]);
-});
 
 describe("CI changed Node test plan", () => {
   it.each(["blacksmith", "github", "hybrid"])(
@@ -981,6 +899,82 @@ describe("CI changed Node test plan", () => {
     ).toBe(true);
   });
 
+  describe("documentation targeting", () => {
+    it("keeps the complete two-job corpus plan beside a documentation page", () => {
+      const targets = [
+        "src/config/config-startup-corpus.test.ts",
+        "src/config/state-startup-corpus.test.ts",
+      ];
+      const before = createChangedNodeTestShards(targets);
+      expect(before).toHaveLength(2);
+      expect(before?.flatMap((shard) => shard.targets ?? [])).toEqual(targets);
+      expect(before?.some((shard) => shard.pretestBuildMode === "runtime")).toBe(true);
+      expect(createChangedNodeTestShards([...targets, "docs/ci/pipeline.md"])).toEqual(before);
+    });
+
+    it.each([
+      [["docs/guide.md"], "file", true],
+      [["docs/guide.mdx"], "file", true],
+      [["README.md"], "file", true],
+      [["docs/deleted.md"], "missing", true],
+      [["docs/old.md", "docs/new.md"], "rename", true],
+      [["docs/reference/templates/AGENTS.md"], "file", false],
+      [["docs/reference/templates/AGENTS.md"], "missing", false],
+      [["src/runtime.md"], "file", false],
+      [["test/fixtures/payload.md"], "file", false],
+      [["docs/script.ts"], "file", false],
+      [["src/deleted.ts", "docs/new.md"], "rename", false],
+      [["docs/reference/templates/old.md", "docs/new.md"], "rename", false],
+      [["docs/old.md", "docs/reference/templates/new.md"], "rename", false],
+      [["docs/guide.md"], "directory", false],
+      [["docs/guide.md"], "symlink", false],
+      [["docs/guide.md"], "dangling", false],
+      [["docs/../guide.md"], "file", false],
+    ] as const)("preserves Node ownership for %j (%s): %s", (paths, kind, precise) => {
+      const cwd = mkdtempSync(path.join(tmpdir(), "openclaw-docs-targeting-"));
+      const target = "src/channels/plugins/unowned.test.ts";
+      try {
+        mkdirSync(path.dirname(path.join(cwd, target)), { recursive: true });
+        writeFileSync(path.join(cwd, target), "export {};\n");
+        for (const file of kind === "missing" ? [] : kind === "rename" ? paths.slice(1) : paths) {
+          const absolute = path.join(cwd, file);
+          mkdirSync(path.dirname(absolute), { recursive: true });
+          if (kind === "directory") {
+            mkdirSync(absolute);
+          } else if (kind === "symlink" || kind === "dangling") {
+            if (kind === "symlink") {
+              writeFileSync(path.join(path.dirname(absolute), "target.md"), "# Guide\n");
+            }
+            symlinkSync("target.md", absolute);
+          } else {
+            writeFileSync(absolute, "# Guide\n");
+          }
+        }
+        const before = createChangedNodeTestShards([target], { cwd });
+        expect(before?.flatMap((shard) => shard.targets ?? [])).toEqual([target]);
+        expect(createChangedNodeTestShards([target, ...paths], { cwd })).toEqual(
+          precise ? before : null,
+        );
+      } finally {
+        rmSync(cwd, { recursive: true, force: true });
+      }
+    });
+
+    it("retains the mapped prompt Markdown owner beside documentation", () => {
+      const fixture =
+        "test/fixtures/agents/prompt-snapshots/codex-runtime-happy-path/telegram-direct-codex-message-tool.md";
+      const before = createChangedNodeTestShards([fixture]);
+      expect(before).not.toBeNull();
+      const ownedTargets = before?.flatMap((shard) => [
+        ...(shard.targets ?? []),
+        ...(shard.includePatterns ?? []),
+        ...(shard.groups?.flatMap((group) => group.includePatterns ?? []) ?? []),
+      ]);
+      expect(ownedTargets).toContain("test/scripts/prompt-snapshots.test.ts");
+      expect(createChangedNodeTestShards([fixture, "docs/ci/pipeline.md"])).toEqual(before);
+    });
+  });
+
   it("fails safe whenever a diff deletes source files", () => {
     expect(createChangedNodeTestShards(["src/infra/format-time/deleted-helper.ts"])).toBeNull();
     expect(
@@ -1342,7 +1336,7 @@ describe("CI changed Node test plan", () => {
     ).toEqual([
       {
         checkName: "checks-node-changed-extensions-config",
-        configs: ["test/vitest/vitest.extension-memory.config.ts"],
+        configs: ["test/vitest/vitest.extension-database-workers.config.ts"],
         planConcurrency: 1,
         predictedSeconds: expect.any(Number),
         requiresDist: false,
@@ -1477,7 +1471,7 @@ describe("CI changed Node test plan", () => {
     expect(shards).not.toBeNull();
     expect(shards).toContainEqual({
       checkName: "checks-node-changed-extensions-config",
-      configs: ["test/vitest/vitest.extension-memory.config.ts"],
+      configs: ["test/vitest/vitest.extension-database-workers.config.ts"],
       planConcurrency: 1,
       predictedSeconds: expect.any(Number),
       requiresDist: false,

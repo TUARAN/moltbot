@@ -165,7 +165,20 @@ describe("requester yield ownership", () => {
 
   it.each([
     { requesterSessionKey: "agent:main:main", runtimeClaim: true, accepted: true },
-    { requesterSessionKey: "agent:main:subagent:worker", runtimeClaim: false, accepted: true },
+    { requesterSessionKey: "agent:main:subagent:worker", runtimeClaim: false, accepted: false },
+    {
+      requesterSessionKey: "agent:main:subagent:worker",
+      runtimeClaim: false,
+      waitFor: "message",
+      accepted: true,
+    },
+    {
+      requesterSessionKey: "agent:main:main",
+      runtimeClaim: false,
+      waitFor: "message",
+      accepted: false,
+    },
+    { requesterSessionKey: CRON_RUN_KEY, runtimeClaim: true, waitFor: "message", accepted: false },
     { requesterSessionKey: "agent:main:main", runtimeClaim: false, accepted: false },
   ])(
     "preserves claim without a registry child: $requesterSessionKey/$runtimeClaim",
@@ -180,12 +193,44 @@ describe("requester yield ownership", () => {
         }),
         onYield,
       });
-      expect((await tool.execute("yield-call", {})).details).toMatchObject({
+      expect((await tool.execute("yield-call", { waitFor: test.waitFor })).details).toMatchObject({
         status: test.accepted ? "yielded" : "error",
       });
       expect(onYield).toHaveBeenCalledTimes(test.accepted ? 1 : 0);
     },
   );
+
+  it("keeps a completed worker active so it can return its result instead of stranding the task", async () => {
+    const onYield = vi.fn();
+    const tool = createTestOpenClawTools({
+      sessionKey: "agent:main:subagent:finished-worker",
+      sessionId: "finished-worker-session",
+      runId: "finished-worker-run",
+      onYield,
+    }).find((candidate) => candidate.name === "sessions_yield");
+    assert.isDefined(tool);
+    const result = await tool.execute("yield-completed-command", {
+      message:
+        "The assigned command completed and returned RESULT_17; process list has no active sessions.",
+    });
+    expect(result.details).toMatchObject({
+      status: "error",
+      error: expect.stringContaining("return its result normally"),
+    });
+    expect(onYield).not.toHaveBeenCalled();
+    expect(
+      (
+        await tool.execute("wait-for-incoming-message", {
+          waitFor: "message",
+          message: "Wait for an operator continuation.",
+        })
+      ).details,
+    ).toMatchObject({ status: "yielded" });
+    expect(onYield).toHaveBeenCalledExactlyOnceWith(
+      "Wait for an operator continuation.",
+      undefined,
+    );
+  });
 
   it.each([
     {
@@ -228,10 +273,12 @@ describe("requester yield ownership", () => {
       assert.isDefined(yieldTool);
       assert.isDefined(processTool);
       const expectStillActive = async () => {
-        expect((await yieldTool.execute("yield-watcher", {})).details).toMatchObject({
-          status: "error",
-          error: expect.stringContaining("Use process to poll and collect"),
-        });
+        for (const waitFor of [undefined, "message"] as const) {
+          expect((await yieldTool.execute("yield-watcher", { waitFor })).details).toMatchObject({
+            status: "error",
+            error: expect.stringContaining("Use process to poll and collect"),
+          });
+        }
         expect(onYield).not.toHaveBeenCalled();
       };
 
@@ -246,6 +293,12 @@ describe("requester yield ownership", () => {
       await expectStillActive();
       acknowledgeInternalToolResult(result);
       expect((await yieldTool.execute("yield-collected", {})).details).toMatchObject({
+        status: "error",
+        error: expect.stringContaining("return its result normally"),
+      });
+      expect(
+        (await yieldTool.execute("yield-collected-message", { waitFor: "message" })).details,
+      ).toMatchObject({
         status: "yielded",
       });
       expect(onYield).toHaveBeenCalledOnce();
@@ -272,7 +325,7 @@ describe("requester yield ownership", () => {
       }).find((candidate) => candidate.name === "sessions_yield");
       assert.isDefined(tool);
 
-      expect((await tool.execute("yield-watcher", {})).details).toMatchObject({
+      expect((await tool.execute("yield-watcher", { waitFor: "message" })).details).toMatchObject({
         status: "yielded",
       });
       expect(onYield).toHaveBeenCalledOnce();
