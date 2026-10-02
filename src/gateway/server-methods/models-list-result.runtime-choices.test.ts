@@ -1,9 +1,9 @@
 import { Value } from "typebox/value";
 import { describe, expect, it, vi } from "vitest";
 import { ModelChoiceSchema } from "../../../packages/gateway-protocol/src/schema/agents-models-skills.js";
-import { augmentPreparedModelCatalogWithAgentHarness } from "../../agents/harness/model-catalog.js";
 import type { AgentHarnessV2 } from "../../agents/harness/types.js";
 import type { ModelCatalogEntry, ModelCatalogSnapshot } from "../../agents/model-catalog.types.js";
+import type { ModelDefinitionConfig } from "../../config/types.models.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { createPluginMetadataSnapshotFixture } from "../../plugins/plugin-metadata.test-support.js";
 import { createEmptyPluginRegistry } from "../../plugins/registry.js";
@@ -15,6 +15,114 @@ import {
 import { WITHOUT_OPENAI_ENV_AUTH } from "./models-list-result.openai-routes.test-support.js";
 
 describe("models.list configured runtime choices", () => {
+  it.each([false, true])(
+    "indexes configured rows once while projecting several logical models (auth rejects: %s)",
+    async (rejectAuth) => {
+      await withOpenClawTestState(
+        { layout: "state-only", prefix: "model-projector-rows-", agentEnv: "main" },
+        async (state) => {
+          const provider = "projection-fixture";
+          const authFailure = new Error("Configured auth read rejected");
+          let rejectAuthReads = false;
+          const configuredRowVisits = new Map<ModelDefinitionConfig, number>();
+          const models = Array.from({ length: 17 }, (_, index): ModelDefinitionConfig => ({
+            id: `model-${index}`,
+            name: `Configured ${index}`,
+            reasoning: false,
+            input: ["text"],
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            contextWindow: 32_000,
+            contextTokens: 16_000 + index,
+            maxTokens: 4096,
+          }));
+          const configuredModels = new Proxy(models, {
+            get(target, key, receiver) {
+              if (key === Symbol.iterator) {
+                return function* () {
+                  for (const model of target) {
+                    configuredRowVisits.set(model, (configuredRowVisits.get(model) ?? 0) + 1);
+                    yield model;
+                  }
+                };
+              }
+              return Reflect.get(target, key, receiver);
+            },
+          });
+          const selectedIndexes = [0, 4, 8, 12, 16];
+          const entries: ModelCatalogEntry[] = selectedIndexes.map((index) => ({
+            provider,
+            id: `model-${index}`,
+            name: `Catalog ${index}`,
+            contextWindow: 8192,
+            contextTokens: 2048,
+          }));
+          const cfg: OpenClawConfig = {
+            agents: { defaults: { workspace: state.workspaceDir, model: `${provider}/model-0` } },
+            models: {
+              providers: {
+                [provider]: {
+                  baseUrl: "https://models.example.test/v1",
+                  models: configuredModels,
+                  get apiKey() {
+                    if (rejectAuthReads) {
+                      throw authFailure;
+                    }
+                    return undefined;
+                  },
+                },
+              },
+            },
+          };
+          const projector = createGatewayAgentModelCatalogProjector({
+            cfg,
+            agentId: "main",
+            snapshot: { entries, routeVariants: entries },
+            metadataSnapshot: createPluginMetadataSnapshotFixture({ plugins: [] }),
+            preparedAuthStore: {
+              version: 1,
+              profiles: {
+                "projection-fixture:test": { type: "api_key", provider, key: "synthetic-test-key" },
+              },
+            },
+          });
+          // Auth scope preparation visits configured models before projection begins.
+          const visitsAfterConstruction = new Map(configuredRowVisits);
+          rejectAuthReads = rejectAuth;
+          if (rejectAuth) {
+            await expect(projector.projectCatalog()).rejects.toBe(authFailure);
+            expect(configuredRowVisits).toEqual(visitsAfterConstruction);
+            return;
+          }
+          const projected = await projector.projectCatalog();
+          expect(
+            projected.map(({ name, contextWindow, contextTokens }) => ({
+              name,
+              contextWindow,
+              contextTokens,
+            })),
+          ).toEqual(
+            selectedIndexes.map((index) => ({
+              name: `Configured ${index}`,
+              contextWindow: 32_000,
+              contextTokens: 16_000 + index,
+            })),
+          );
+          expect(
+            Math.max(
+              ...Array.from(
+                configuredRowVisits,
+                ([model, visits]) => visits - (visitsAfterConstruction.get(model) ?? 0),
+              ),
+            ),
+          ).toBeLessThanOrEqual(1);
+          const visitsAfterProjection = new Map(configuredRowVisits);
+          expect(await projector.projectCatalog()).toBe(projected);
+          expect(configuredRowVisits).toEqual(visitsAfterProjection);
+        },
+      );
+    },
+  );
+
   it.each([true, false])(
     "isolates an OpenClaw alternative from native-first metadata (host donor: %s)",
     async (hostDonor) => {
@@ -115,7 +223,10 @@ describe("models.list configured runtime choices", () => {
               contextWindow: 32_000,
               reasoning: false,
               input: ["text"],
-              thinkingLevels: [{ id: "off", label: "off" }],
+              thinkingLevels: [
+                { id: "off", label: "off" },
+                { id: "ultra", label: "ultra" },
+              ],
             });
           } else {
             expect(choice).not.toHaveProperty("contextWindow");
@@ -149,48 +260,30 @@ describe("models.list configured runtime choices", () => {
     {
       provider: "openai",
       runtime: "codex",
-      runtimeOverride: undefined,
-      initialReadiness: "ready",
-      acquireNative: false,
-    },
-    {
-      provider: "openai",
-      runtime: "codex",
       runtimeOverride: "codex",
       initialReadiness: "ready",
-      acquireNative: false,
     },
     {
       provider: "openai",
       runtime: "codex",
       runtimeOverride: undefined,
       initialReadiness: "missing",
-      acquireNative: false,
     },
     {
       provider: "openai",
       runtime: "codex",
       runtimeOverride: undefined,
       initialReadiness: "throws",
-      acquireNative: false,
-    },
-    {
-      provider: "openai",
-      runtime: "codex",
-      runtimeOverride: undefined,
-      initialReadiness: "ready",
-      acquireNative: true,
     },
     {
       provider: "picker-fixture",
       runtime: "picker-native",
       runtimeOverride: undefined,
       initialReadiness: "ready",
-      acquireNative: false,
     },
   ])(
-    "keeps $runtime capabilities and selection availability with session runtime $runtimeOverride, readiness $initialReadiness, acquisition $acquireNative",
-    async ({ provider, runtime, runtimeOverride, initialReadiness, acquireNative }) => {
+    "keeps $runtime capabilities and selection availability with session runtime $runtimeOverride, readiness $initialReadiness",
+    async ({ provider, runtime, runtimeOverride, initialReadiness }) => {
       await withOpenClawTestState(
         {
           layout: "state-only",
@@ -239,16 +332,12 @@ describe("models.list configured runtime choices", () => {
             },
             thinkingLevelMap: { off: null, low: "low", high: "high" },
           };
-          let snapshot: ModelCatalogSnapshot = {
+          const snapshot: ModelCatalogSnapshot = {
             entries: [base],
-            routeVariants: acquireNative ? [base] : [base, native],
+            routeVariants: [base, native],
           };
           let readiness = initialReadiness;
-          let observed = !acquireNative;
-          const loadModelCatalog = vi.fn(async () => {
-            observed = true;
-            return [native];
-          });
+          const loadModelCatalog = vi.fn(async () => [native]);
           const harness: AgentHarnessV2 = {
             id: runtime,
             label: "Native fixture",
@@ -260,33 +349,11 @@ describe("models.list configured runtime choices", () => {
               if (readiness === "throws") {
                 throw new Error("Native catalog observation failed");
               }
-              return observed && readiness === "ready" ? { accountType: "chatgpt" } : undefined;
+              return readiness === "ready" ? { accountType: "chatgpt" } : undefined;
             },
           };
           const pluginRegistry = createEmptyPluginRegistry();
           pluginRegistry.agentHarnesses.push({ pluginId: runtime, source: "test", harness });
-          if (acquireNative) {
-            expect(
-              harness.readModelCatalogReadiness?.({
-                config: cfg,
-                agentId: "main",
-                agentDir: state.agentDir("main"),
-                workspaceDir: state.workspaceDir,
-                provider,
-                modelId: model,
-              }),
-            ).toBeUndefined();
-            snapshot = await augmentPreparedModelCatalogWithAgentHarness({
-              input: {
-                config: cfg,
-                agentId: "main",
-                agentDir: state.agentDir("main"),
-                workspaceDir: state.workspaceDir,
-              },
-              snapshot,
-              pluginRegistry,
-            });
-          }
           const projector = createGatewayAgentModelCatalogProjector({
             cfg,
             agentId: "main",
@@ -365,7 +432,7 @@ describe("models.list configured runtime choices", () => {
           } else {
             expect(revokedChoice?.unavailableReason).toBe("unsupported-runtime");
           }
-          expect(loadModelCatalog).toHaveBeenCalledTimes(acquireNative ? 1 : 0);
+          expect(loadModelCatalog).not.toHaveBeenCalled();
           expect(loadGatewayModelCatalogSnapshot).not.toHaveBeenCalled();
           expect(cfg.agents?.defaults?.models?.[`${provider}/${model}`]?.agentRuntime?.id).toBe(
             "openclaw",

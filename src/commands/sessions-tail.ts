@@ -1,14 +1,13 @@
 import { parseStrictNonNegativeInteger } from "@openclaw/normalization-core/number-coercion";
 import { normalizeOptionalString as toOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { sanitizeTerminalText } from "../../packages/terminal-core/src/safe-text.js";
-import {
-  readAcpSessionMetaForEntry,
-  resolveSessionStorePathForAcp,
-} from "../acp/runtime/session-meta.js";
+import { readAcpSessionMetaForEntry } from "../acp/runtime/session-meta-readonly.js";
+import { resolveSessionStorePathForAcp } from "../acp/runtime/session-meta.js";
 import {
   buildAgentRunTerminalOutcomeFromLifecycleEvent,
   classifyAgentRunTerminalOutcome,
 } from "../agents/agent-run-terminal-outcome.js";
+import { formatCliCommand } from "../cli/command-format.js";
 import { getRuntimeConfig } from "../config/config.js";
 import { listSessionEntriesReadOnly } from "../config/sessions/session-accessor.js";
 import type { SessionEntry } from "../config/sessions/types.js";
@@ -198,9 +197,8 @@ function buildTailSelection(params: {
 }
 
 function selectSessionsToTail(selections: TailSelection[], sessionKey?: string): TailSelection[] {
-  const requested = sessionKey?.trim();
-  if (requested) {
-    return selections.filter((selection) => selection.key === requested);
+  if (sessionKey) {
+    return selections.filter((selection) => selection.key === sessionKey);
   }
 
   const running = selections.filter((selection) => isRunningSession(selection));
@@ -274,12 +272,15 @@ function followSelections(
   });
 }
 
-function resolveTailTargetAgent(opts: SessionsTailOptions): string | undefined {
+function resolveTailTargetAgent(
+  opts: SessionsTailOptions,
+  sessionKey: string | undefined,
+): string | undefined {
   // Keep explicit blanks for the selector to reject instead of inferring a different owner.
   if (opts.agent !== undefined || opts.store !== undefined || opts.allAgents === true) {
     return opts.agent;
   }
-  return opts.sessionKey?.trim() ? resolveAgentIdFromSessionKey(opts.sessionKey) : undefined;
+  return sessionKey ? resolveAgentIdFromSessionKey(sessionKey) : undefined;
 }
 
 /** Tails recent trajectory events for the selected session(s). */
@@ -293,13 +294,19 @@ export async function sessionsTailCommand(
     runtime.exit(1);
     return;
   }
+  const requestedKey = opts.sessionKey?.trim();
+  if (opts.sessionKey !== undefined && !requestedKey) {
+    runtime.error("--session-key must not be empty. Omit it to tail active sessions.");
+    runtime.exit(1);
+    return;
+  }
 
   const cfg = getRuntimeConfig();
   const targets = resolveCommandSessionStoreTargets({
     cfg,
     opts: {
       store: opts.store,
-      agent: resolveTailTargetAgent(opts),
+      agent: resolveTailTargetAgent(opts, requestedKey),
       allAgents: opts.allAgents,
     },
   });
@@ -322,10 +329,16 @@ export async function sessionsTailCommand(
       }
     }
   }
-  const selected = selectSessionsToTail(selections, opts.sessionKey);
+  const selected = selectSessionsToTail(selections, requestedKey);
   if (selected.length === 0) {
-    const suffix = opts.sessionKey ? ` for ${opts.sessionKey}` : "";
-    runtime.log(`No sessions found${suffix}.`);
+    if (requestedKey) {
+      runtime.error(
+        `Session not found: ${requestedKey}. Run ${formatCliCommand("openclaw sessions list --all-agents --json")} to choose a valid key.`,
+      );
+      runtime.exit(1);
+    } else {
+      runtime.log("No sessions found.");
+    }
     return;
   }
 

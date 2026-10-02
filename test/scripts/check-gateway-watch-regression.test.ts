@@ -4,7 +4,6 @@ import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
-import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   appendBoundedWatchLog,
@@ -25,10 +24,16 @@ import {
   BUILD_STAMP_FILE,
   RUNTIME_POSTBUILD_STAMP_FILE,
 } from "../../scripts/lib/local-build-metadata-paths.mts";
+import { refreshLocalBuildStampTimes } from "../../scripts/lib/local-build-metadata.mts";
 import { runManagedCommand } from "../../scripts/lib/managed-child-process.mts";
 import { createVitestResourceOwner } from "../../scripts/lib/vitest-resource-ownership.mts";
+import {
+  resolveRuntimeWorkerArgv,
+  resolveRuntimeWorkerUrl,
+} from "../../src/infra/runtime-worker-url.js";
 import { resolveTestNodeExecPath } from "../../src/test-utils/node-process.js";
 import { useAutoCleanupTempDirTracker } from "../helpers/temp-dir.js";
+import { toolingMtsEntrypoints } from "./tooling-mts-runtime.test-support.mts";
 
 vi.mock("node:child_process", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:child_process")>();
@@ -43,6 +48,11 @@ vi.mock("../../scripts/lib/managed-child-process.mts", async (importOriginal) =>
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 
+class WatchChildProcess extends ChildProcess {
+  override readonly stdout = new PassThrough();
+  override readonly stderr = new PassThrough();
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
@@ -56,12 +66,9 @@ function createWatchChildFixture(outputDir: string) {
     code: null,
     signal: null,
   };
-  const child = Object.assign(new ChildProcess(), {
-    pid: 1234,
-    stdout: new PassThrough(),
-    stderr: new PassThrough(),
-  });
+  const child = new WatchChildProcess();
   Object.defineProperties(child, {
+    pid: { configurable: true, value: 1234 },
     exitCode: { get: () => exitState.code },
     signalCode: { get: () => exitState.signal },
   });
@@ -338,10 +345,7 @@ describe("check-gateway-watch-regression", () => {
       samples: [50_000, 59_000],
       idleCpuMs: 9_000,
       lateError: "fixture shutdown error",
-      failures: [
-        "gateway:watch failed to start: fixture shutdown error",
-        "LOUD ALARM: gateway:watch used 9000ms CPU in 10000ms window, above loud-alarm threshold 8000ms",
-      ],
+      failures: ["gateway:watch failed to start: fixture shutdown error"],
     },
   ])("$name", async ({ ready, samples, idleCpuMs, lateError, failures }) => {
     const outputDir = tempDirs.make("openclaw-gateway-watch-measurement-");
@@ -407,6 +411,17 @@ describe("check-gateway-watch-regression", () => {
     });
     expect(findings.failures).toEqual(failures);
     expect(findings.warnings).toEqual([]);
+    expect(findings.limitViolations).toEqual(
+      idleCpuMs !== null && idleCpuMs > options.cpuFailMs
+        ? [
+            {
+              file: "scripts/check-gateway-watch-regression.mts",
+              title: "Gateway watch CPU budget",
+              message: "gateway:watch used 9000ms CPU in 10000ms window, above threshold 8000ms",
+            },
+          ]
+        : [],
+    );
   });
 
   it("reports early gateway watch exit before readiness distinctly", () => {
@@ -523,6 +538,23 @@ describe("check-gateway-watch-regression", () => {
       );
     } finally {
       fs.rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([false, null, undefined])("retains restored stamp provenance (%s)", (inputsClean) => {
+    const rootDir = tempDirs.make("openclaw-watch-restored-stamps-");
+    fs.mkdirSync(path.join(rootDir, "dist"));
+    const contents = JSON.stringify({ head: "producer-head", inputsClean });
+    for (const name of [BUILD_STAMP_FILE, RUNTIME_POSTBUILD_STAMP_FILE]) {
+      const filename = path.join(rootDir, "dist", name);
+      fs.writeFileSync(filename, contents);
+      fs.utimesSync(filename, 1, 1);
+    }
+    refreshLocalBuildStampTimes({ cwd: rootDir, now: () => 10_000 });
+    for (const name of [BUILD_STAMP_FILE, RUNTIME_POSTBUILD_STAMP_FILE]) {
+      const filename = path.join(rootDir, "dist", name);
+      expect(fs.readFileSync(filename, "utf8")).toBe(contents);
+      expect(fs.statSync(filename).mtimeMs).toBe(10_000);
     }
   });
 
@@ -715,10 +747,7 @@ describe("check-gateway-watch-regression", () => {
 
   it("removes the isolated watch home after spawn failures", async () => {
     const outputDir = tempDirs.make("openclaw-gateway-watch-output-");
-    const child = Object.assign(new ChildProcess(), {
-      stdout: new PassThrough(),
-      stderr: new PassThrough(),
-    });
+    const child = new WatchChildProcess();
     let sleepSettled = false;
     const sleep = vi.fn(async (ms: number, signal: AbortSignal) => {
       try {
@@ -774,11 +803,12 @@ describe("check-gateway-watch-regression", () => {
 
   it("releases default readiness timers so an early-exit observer finishes naturally", () => {
     const outputDir = tempDirs.make("openclaw-gateway-watch-readiness-exit-");
+    const ownerUrl = resolveRuntimeWorkerUrl(toolingMtsEntrypoints.gatewayWatch);
+    const nodeExecutable = resolveTestNodeExecPath();
     const result = spawnSync(
-      resolveTestNodeExecPath(),
+      nodeExecutable,
       [
-        "--import",
-        pathToFileURL(path.resolve("scripts/tsx.mjs")).href,
+        ...resolveRuntimeWorkerArgv(ownerUrl, nodeExecutable).slice(0, -1),
         "--input-type=module",
         "-e",
         `
@@ -818,7 +848,7 @@ process.kill = (pid, signal) => {
   return true;
 };
 syncBuiltinESMExports();
-const { runTimedWatch } = await import(${JSON.stringify(pathToFileURL(path.resolve("scripts/check-gateway-watch-regression.mts")).href)});
+const { runTimedWatch } = await import(${JSON.stringify(ownerUrl.href)});
 const result = await runTimedWatch({
   readySettleMs: 0, readyTimeoutMs: 30_000, sigkillGraceMs: 1,
   sigkillExitGraceMs: 100, windowMs: 10_000,

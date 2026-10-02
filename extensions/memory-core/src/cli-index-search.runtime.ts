@@ -1,10 +1,21 @@
 import path from "node:path";
 import { resolveMemorySearchStaleness } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
 import {
+  defaultRuntime,
+  formatErrorMessage,
+  setVerbose,
+  shortenHomeInString,
+  shortenHomePath,
+  theme,
+  withProgressTotals,
+} from "openclaw/plugin-sdk/memory-core-host-runtime-cli";
+import { getRuntimeConfig } from "openclaw/plugin-sdk/memory-core-host-runtime-core";
+import {
   resolveMemoryDreamingConfig,
   resolveMemoryDreamingWorkspace,
   resolveMemoryDeepDreamingConfig,
 } from "openclaw/plugin-sdk/memory-core-host-status";
+import { resolveNonNegativeIntegerOption } from "openclaw/plugin-sdk/number-runtime";
 import {
   buildCliMemorySearchSessionKey,
   formatAuditCounts,
@@ -15,16 +26,6 @@ import {
   scanMemoryManagerSources,
   withMemoryCommand,
 } from "./cli-runtime-common.js";
-import {
-  defaultRuntime,
-  formatErrorMessage,
-  getRuntimeConfig,
-  setVerbose,
-  shortenHomeInString,
-  shortenHomePath,
-  theme,
-  withProgressTotals,
-} from "./cli.host.runtime.js";
 import type {
   MemoryCommandOptions,
   MemoryForgetCommandOptions,
@@ -197,14 +198,10 @@ export async function runMemoryIndex(
   });
 }
 export async function runMemorySearch(
-  queryArg: string | undefined,
+  query: string,
   opts: MemorySearchCommandOptions,
   hostOptions?: MemoryCoreRuntimeHost,
 ) {
-  const query = opts.query ?? queryArg;
-  if (!query) {
-    throw new Error("Missing search query. Provide a positional query or use --query <text>.");
-  }
   await withMemoryCommand({
     commandName: "memory search",
     agent: opts.agent,
@@ -282,11 +279,6 @@ export async function runMemorySearch(
 }
 
 export async function runMemoryForget(opts: MemoryForgetCommandOptions) {
-  if (!opts.session?.length && !opts.hookSource?.length && !opts.participant?.length) {
-    throw new Error(
-      "Memory forget requires --session <id-or-key>, --hook-source <source>, or --participant <actor-id>.",
-    );
-  }
   try {
     const cfg = getRuntimeConfig({ skipPluginValidation: true });
     const agentId = resolveMemoryAgent(cfg, opts.agent);
@@ -366,7 +358,6 @@ function matchesPromotionSelector(
     return false;
   }
   return (
-    candidate.key.toLowerCase() === trimmed ||
     candidate.key.toLowerCase().includes(trimmed) ||
     candidate.path.toLowerCase().includes(trimmed) ||
     candidate.snippet.toLowerCase().includes(trimmed)
@@ -443,10 +434,7 @@ export async function runMemoryPromote(
           });
         }
       }
-      const outputLimit =
-        typeof opts.limit === "number" && Number.isFinite(opts.limit)
-          ? Math.max(0, Math.floor(opts.limit))
-          : candidates.length;
+      const outputLimit = resolveNonNegativeIntegerOption(opts.limit, candidates.length);
       const rejectedCandidates = applyResult
         ? applyResult.rejectedCandidates.slice(
             0,
@@ -549,14 +537,10 @@ export async function runMemoryPromote(
   });
 }
 export async function runMemoryPromoteExplain(
-  selectorArg: string | undefined,
+  selector: string,
   opts: MemoryPromoteExplainOptions,
   hostOptions?: MemoryCoreRuntimeHost,
 ) {
-  const selector = selectorArg?.trim();
-  if (!selector) {
-    throw new Error("Memory promote-explain requires a non-empty selector.");
-  }
   await withMemoryCommand({
     commandName: "memory promote-explain",
     agent: opts.agent,

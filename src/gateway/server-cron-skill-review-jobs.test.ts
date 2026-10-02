@@ -7,7 +7,12 @@ import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { CronService } from "../cron/service.js";
 import { saveCronJobsStore } from "../cron/store.js";
 import type { CronJob } from "../cron/types.js";
+import {
+  closeOpenClawAgentDatabasesForTest,
+  getOpenClawAgentDatabaseIfOpen,
+} from "../state/openclaw-agent-db.js";
 import { openOpenClawStateDatabase } from "../state/openclaw-state-db.js";
+import { createTestGatewayScheduler } from "../test-utils/gateway-scheduler-clock.js";
 import { createOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 import { reconcileSkillCollectionReviewJobs } from "./server-cron-skill-review-jobs.js";
 
@@ -233,6 +238,7 @@ describe("reconcileSkillCollectionReviewJobs", () => {
   ])("preserves an existing review with stored execution preferences: %j", async (preferences) => {
     const testState = await createOpenClawTestState({ label: "skill-review-preferences" });
     const cron = new CronService({
+      scheduler: createTestGatewayScheduler(),
       storePath: testState.statePath("cron", "jobs.json"),
       cronEnabled: false,
       log: logger,
@@ -269,9 +275,11 @@ describe("reconcileSkillCollectionReviewJobs", () => {
           ...preferences,
         },
       );
+      closeOpenClawAgentDatabasesForTest();
       await expect(reconcileSkillCollectionReviewJobs({ cron, cfg, logger })).resolves.toEqual({
         ok: true,
       });
+      expect(Boolean(getOpenClawAgentDatabaseIfOpen({ agentId: "main" }))).toBe(false);
       const [retained] = await cron.list({ includeDisabled: true });
       expect(retained).toMatchObject({ id: existing.id, enabled: true });
       expect(retained?.displayName).not.toContain("no-rooted-runtime");
@@ -291,6 +299,7 @@ describe("reconcileSkillCollectionReviewJobs", () => {
       agents: { ownership: "explicit", list: [{ id: "main", default: true }, { id: "ops" }] },
     };
     const deps = {
+      scheduler: createTestGatewayScheduler(),
       storePath,
       cronEnabled: false,
       log: logger,
@@ -363,6 +372,7 @@ describe("reconcileSkillCollectionReviewJobs", () => {
       }
     });
     const cron = new CronService({
+      scheduler: createTestGatewayScheduler(),
       storePath: testState.statePath("cron", "jobs.json"),
       cronEnabled: true,
       log: logger,

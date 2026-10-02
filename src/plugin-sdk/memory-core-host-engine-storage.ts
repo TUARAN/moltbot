@@ -1,6 +1,13 @@
 /**
- * Public SDK subpath for memory host storage, indexing, and search primitives.
+ * Private runtime facade for memory host storage, indexing, and search primitives.
  */
+export {
+  ensureMemoryEntryOriginsSchema,
+  readMemoryEntryOriginsInDatabase,
+  recordMemoryEntryOriginsInDatabase,
+  type MemoryEntryOrigin,
+} from "../../packages/memory-host-sdk/src/memory-entry-origins.js";
+
 export {
   buildFileEntry,
   buildMemoryReadResult,
@@ -10,6 +17,8 @@ export {
   closeMemorySqliteWalMaintenance,
   configureMemorySqliteWalMaintenance,
   cosineSimilarity,
+  encodeMemoryEmbedding,
+  decodeMemoryEmbedding,
   createMemorySearchDeadlineControl,
   extractProjectKeysFromCuratedEntry,
   DEFAULT_MEMORY_READ_LINES,
@@ -28,6 +37,7 @@ export {
   isTransientMemoryReadError,
   listMemoryFiles,
   loadSqliteVecExtension,
+  loadSqliteVecExtensionFromPath,
   matchesExtraMemoryPathEntry,
   MEMORY_SEARCH_DEADLINE_CONTROL,
   MEMORY_CHUNKING_VERSION,
@@ -62,10 +72,13 @@ export {
   runWithConcurrency,
   splitCuratedMarkdownEntries,
   statRegularFile,
+  stopMemorySqliteWalMaintenance,
   stripMemoryAnnotationCarriers,
 } from "../../packages/memory-host-sdk/src/engine-storage.js";
 
 export type {
+  MemoryWorkspaceFiles,
+  MemoryWorkspaceWatchRequest,
   CuratedMarkdownEntry,
   CuratedProjectAnnotations,
   MemoryEntryProvenance,

@@ -39,9 +39,9 @@ type AgentSelectionState = {
 
 export type AgentSelectionCapability = {
   readonly state: AgentSelectionState;
-  /** Changes on explicit selection intent or Gateway replacement, including same-id intent. */
+  /** Changes on explicit selection/scope intent or Gateway replacement, including same-id intent. */
   readonly intentRevision: number;
-  set: (agentId: string | null) => void;
+  set: (agentId: string | null, options?: { background?: boolean }) => void;
   setScope: (agentId: string | null) => void;
   subscribe: (listener: (state: AgentSelectionState) => void) => () => void;
 };
@@ -54,10 +54,15 @@ export function selectApplicationSession(params: {
   gateway: { setSessionKey: (sessionKey: string) => void };
   sessionKey: string;
   agentId?: string | null;
+  background?: boolean;
 }): void {
   const agentId = params.agentId?.trim() || parseAgentSessionKey(params.sessionKey)?.agentId;
   if (agentId) {
-    params.selection.set(normalizeAgentId(agentId));
+    if (params.background) {
+      params.selection.set(normalizeAgentId(agentId), { background: true });
+    } else {
+      params.selection.set(normalizeAgentId(agentId));
+    }
   }
   params.gateway.setSessionKey(params.sessionKey);
 }
@@ -72,27 +77,24 @@ export function createAgentSelectionCapability(
   const reconcileSelectedId = (value: string | null): string | null => {
     const selectedId = value?.trim() ? normalizeAgentId(value) : null;
     const agentsList = roster.state.agentsList;
-    if (options.requireConfiguredAgent) {
-      const agents = agentsList?.agents.filter((agent) => agent.kind !== "system") ?? [];
-      const hasAgent = (id: string | null) =>
-        agents.some((agent) => normalizeAgentId(agent.id) === id);
-      const defaultId = agentsList ? normalizeAgentId(agentsList.defaultId) : null;
-      return hasAgent(selectedId)
-        ? selectedId
-        : hasAgent(defaultId)
-          ? defaultId
-          : agents[0]
-            ? normalizeAgentId(agents[0].id)
-            : null;
-    }
-    if (!agentsList || agentsList.agents.length === 0) {
+    if (!agentsList && !options.requireConfiguredAgent) {
       return selectedId;
     }
-    const defaultId = normalizeAgentId(agentsList.defaultId);
-    return !selectedId ||
-      !agentsList.agents.some((agent) => normalizeAgentId(agent.id) === selectedId)
-      ? defaultId
-      : selectedId;
+    const agents =
+      agentsList?.agents.filter(
+        (agent) => !options.requireConfiguredAgent || agent.kind !== "system",
+      ) ?? [];
+    const hasAgent = (id: string | null) =>
+      agents.some((agent) => normalizeAgentId(agent.id) === id);
+    // Gateway routing defaults can name an agent outside this caller's visible roster.
+    const defaultId = agentsList ? normalizeAgentId(agentsList.defaultId) : null;
+    return hasAgent(selectedId)
+      ? selectedId
+      : hasAgent(defaultId)
+        ? defaultId
+        : agents[0]
+          ? normalizeAgentId(agents[0].id)
+          : null;
   };
   const resolveScopeId = (value: string | null): string | null => {
     const scopeId = value?.trim() ? normalizeAgentId(value) : null;
@@ -144,6 +146,7 @@ export function createAgentSelectionCapability(
   }
   const listeners = new Set<(next: AgentSelectionState) => void>();
   let intentRevision = 0;
+  let publishedIntentRevision = intentRevision;
 
   const publish = (next: AgentSelectionState) => {
     const selectedId = reconcileSelectedId(next.selectedId);
@@ -155,9 +158,15 @@ export function createAgentSelectionCapability(
         ? next.scopeId
         : selectedId;
     const reconciled = { selectedId, scopeId: resolveScopeId(scopeId) };
-    if (state.selectedId === reconciled.selectedId && state.scopeId === reconciled.scopeId) {
+    if (
+      state.selectedId === reconciled.selectedId &&
+      state.scopeId === reconciled.scopeId &&
+      publishedIntentRevision === intentRevision
+    ) {
       return;
     }
+    // Same-scope intent must reach observers now, not be attributed to a later roster update.
+    publishedIntentRevision = intentRevision;
     state = reconciled;
     for (const listener of listeners) {
       listener(state);
@@ -174,6 +183,7 @@ export function createAgentSelectionCapability(
     if (nextTeamMode === teamMode) {
       return;
     }
+    intentRevision += 1;
     teamMode = nextTeamMode;
     if (teamMode) {
       previousScopeId = state.scopeId;
@@ -244,7 +254,7 @@ export function createAgentSelectionCapability(
       roster.state.agentsList?.agents.map((agent) => normalizeAgentId(agent.id)),
     );
     let scopeId = state.scopeId;
-    if (nextIds.size > 0) {
+    if (roster.state.agentsList) {
       // A saved selection can disappear before the first roster arrives. Explicit
       // historical page filters remain valid even when they are no longer configured.
       if (
@@ -285,8 +295,11 @@ export function createAgentSelectionCapability(
     }
   });
 
-  const setSelectedId = (agentId: string | null) => {
-    intentRevision += 1;
+  const setSelectedId = (agentId: string | null, intent?: { background?: boolean }) => {
+    // Route hydration binds ownership without promoting its roster above the transcript.
+    if (!intent?.background) {
+      intentRevision += 1;
+    }
     const selectedId = agentId?.trim() ? normalizeAgentId(agentId) : null;
     pendingConfiguredId =
       options.requireConfiguredAgent && !roster.state.agentsList ? selectedId : null;
@@ -313,6 +326,7 @@ export function createAgentSelectionCapability(
         setSelectedId(agentId);
         return;
       }
+      intentRevision += 1;
       scopeNeedsRoster = false;
       const scopeId = agentId?.trim() ? normalizeAgentId(agentId) : null;
       publish({ ...state, scopeId });

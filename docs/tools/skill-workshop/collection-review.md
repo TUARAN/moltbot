@@ -40,6 +40,8 @@ node-placed CLI execution, remain unsupported for rooted reviews. When the confi
 model chain is provably unsupported, the weekly job remains visible but disabled
 with `no-rooted-runtime` in its display name. Configure a supported runtime or fallback;
 Gateway startup and config reload reconcile enablement and clear that reason.
+Reconciliation uses prepared policy and processes one agent at a time, yielding
+between updates so fleet-wide review preparation does not block Gateway health requests.
 Stored session model or runtime preferences are preserved; reviews with these
 preferences remain enabled because configuration alone cannot prove their execution path.
 If eligibility cannot be determined statically, the job remains enabled and runtime
@@ -103,3 +105,9 @@ Retained legacy backups may instead live under
 `<state-dir>/skill-workshop/collection-backups/<workspace-hash>/<backup-id>/`
 and contain a `workspace/` subtree. Preserve that original layout in inspection
 copies; do not rewrite the manifest to make an old backup look current.
+
+Doctor retains the legacy source after importing a history-only copy. Once it
+verifies a matching archive and saved workspace contents in a configured agent's
+backup directory, later runs stop reporting that backup as pending, even if the
+original workspace is no longer configured. Missing, incomplete, or mismatched
+copies still require review; the original source remains intact.

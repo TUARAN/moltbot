@@ -3,6 +3,9 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../test/helpers/promise.js";
 import { runNodeScript } from "../../test/helpers/run-node-script.js";
+import { resolveRuntimeWorkerArgv, resolveRuntimeWorkerUrl } from "../infra/runtime-worker-url.js";
+import { resolveTestNodeExecPath } from "../test-utils/node-process.js";
+import { diagnosticProfileEntrypoints } from "./diagnostic-profile-runtime.test-support.js";
 
 const native = vi.hoisted(() => ({
   connect: vi.fn(),
@@ -14,6 +17,7 @@ const native = vi.hoisted(() => ({
   tracingCategories: vi.fn(),
   unsupported: false,
 }));
+const hostBunVersion = Object.getOwnPropertyDescriptor(process.versions, "bun");
 vi.mock("node:timers/promises", () => ({ setTimeout: native.wait }));
 vi.mock("node:trace_events", () => ({ getEnabledCategories: native.tracingCategories }));
 vi.mock("../infra/openclaw-root.js", async (importOriginal) => ({
@@ -82,6 +86,11 @@ async function capture(signal = new AbortController().signal, hasAuthority = () 
 }
 
 beforeEach(() => {
+  if (hostBunVersion) {
+    // Most cases exercise the Node inspector owner through a mocked native
+    // session. The dedicated Bun case below retains the unsupported contract.
+    Object.defineProperty(process.versions, "bun", { ...hostBunVersion, value: undefined });
+  }
   vi.resetModules();
   vi.resetAllMocks();
   vi.stubEnv("NODE_OPTIONS", "");
@@ -106,9 +115,38 @@ beforeEach(() => {
   );
   native.wait.mockResolvedValue(undefined);
 });
-afterEach(() => vi.unstubAllEnvs());
+afterEach(() => {
+  vi.restoreAllMocks();
+  if (hostBunVersion) {
+    Object.defineProperty(process.versions, "bun", hostBunVersion);
+  }
+  vi.unstubAllEnvs();
+});
 
 describe("diagnostic CPU profile owner", () => {
+  it("reports synchronous start blocking separately from awaited capture time", async () => {
+    let now = 100;
+    vi.spyOn(performance, "now").mockImplementation(() => now);
+    native.post.mockImplementation((method: string) => {
+      if (method === "Profiler.start") {
+        now += 2_100;
+        return Promise.resolve().then(() => {
+          now += 700;
+          return {};
+        });
+      }
+      now += 20;
+      return Promise.resolve(method === "Profiler.stop" ? { profile: profile() } : {});
+    });
+    native.wait.mockImplementation(async () => {
+      now += 5_000;
+    });
+    expect(await capture()).toMatchObject({
+      status: "complete",
+      result: { startBlockedMs: 2_100, actualDurationMs: 5_500 },
+    });
+  });
+
   it("returns a complete sanitized graph only after native cleanup", async () => {
     const outcome = await capture();
     expect(outcome.status).toBe("complete");
@@ -151,9 +189,19 @@ describe("diagnostic CPU profile owner", () => {
     expect((await capture()).status).toBe("complete");
   });
 
-  it("preserves sample order when native timestamps move backward", async () => {
+  it("preserves native signed script IDs, source offsets and sample order", async () => {
     const value = profile();
     value.timeDeltas = [10_000, -500, 10_500];
+    value.nodes[1].callFrame.lineNumber = -10;
+    value.nodes[1].callFrame.columnNumber = -200;
+    value.nodes[1].positionTicks = [{ line: -9, ticks: 2 }];
+    value.nodes[2].callFrame = {
+      functionName: "wasm-to-js",
+      scriptId: "-1",
+      url: "",
+      lineNumber: 0,
+      columnNumber: 0,
+    };
     native.post.mockImplementation(async (method) =>
       method === "Profiler.stop" ? { profile: value } : {},
     );
@@ -161,12 +209,46 @@ describe("diagnostic CPU profile owner", () => {
       status: "complete",
       result: {
         profile: {
+          nodes: expect.arrayContaining([
+            expect.objectContaining({
+              id: 2,
+              callFrame: expect.objectContaining({ lineNumber: -10, columnNumber: -200 }),
+              positionTicks: [{ line: -9, ticks: 2 }],
+            }),
+            expect.objectContaining({
+              id: 3,
+              callFrame: {
+                functionName: "[redacted]",
+                scriptId: "-1",
+                url: "",
+                lineNumber: 0,
+                columnNumber: 0,
+              },
+            }),
+          ]),
           samples: [2, 3, 2],
           timeDeltas: [10_000, -500, 10_500],
         },
       },
     });
   });
+
+  it.each(["private payload", "-", "-1.5", `-${"1".repeat(33)}`])(
+    "rejects malformed or oversized script IDs: %s",
+    async (scriptId) => {
+      const value = profile();
+      value.nodes[1].callFrame.scriptId = scriptId;
+      native.post.mockImplementation(async (method) =>
+        method === "Profiler.stop" ? { profile: value } : {},
+      );
+      expect(await capture()).toEqual({
+        status: "unavailable",
+        reason: "invalid-profile",
+        cleanupFailed: false,
+      });
+      expect(native.disconnect).toHaveBeenCalledOnce();
+    },
+  );
 
   it("rejects overlap instead of queuing, and stops on cancellation", async () => {
     const controller = new AbortController();
@@ -403,6 +485,24 @@ describe("diagnostic CPU profile owner", () => {
       },
     ],
     [
+      "fractional source line",
+      (value: ProfileFixture) => {
+        value.nodes[1].callFrame.lineNumber = -1.5;
+      },
+    ],
+    [
+      "fractional source column",
+      (value: ProfileFixture) => {
+        value.nodes[1].callFrame.columnNumber = -1.5;
+      },
+    ],
+    [
+      "fractional position-tick line",
+      (value: ProfileFixture) => {
+        value.nodes[1].positionTicks = [{ line: -1.5, ticks: 2 }];
+      },
+    ],
+    [
       "duplicate node",
       (value: ProfileFixture) => {
         value.nodes[1].id = 1;
@@ -463,19 +563,19 @@ describe("diagnostic CPU profile owner", () => {
     "captures a real Node profile in an isolated child without opening a listener",
     async ({ signal }) => {
       // Keep V8 coverage and mocked inspector/timers in the test worker. The
-      // fresh child exercises the actual owner with only the repo's TS loader.
+      // fresh child exercises the prepared owner without inheriting either.
       const env: NodeJS.ProcessEnv = {};
       for (const key of ["PATH", "TMPDIR", "TMP", "TEMP"]) {
         if (process.env[key]) {
           env[key] = process.env[key];
         }
       }
-      const ownerUrl = new URL("./diagnostic-cpu-profile.ts", import.meta.url).href;
+      const ownerUrl = resolveRuntimeWorkerUrl(diagnosticProfileEntrypoints.cpu);
       const root = fileURLToPath(new URL("../../", import.meta.url));
       const source = `
 import assert from 'node:assert/strict';
 import { url } from 'node:inspector/promises';
-import { captureDiagnosticCpuProfile } from ${JSON.stringify(ownerUrl)};
+import { captureDiagnosticCpuProfile } from ${JSON.stringify(ownerUrl.href)};
 assert.equal(url(), undefined);
 const pid = process.pid;
 const outcome = await captureDiagnosticCpuProfile({ signal: new AbortController().signal, hasAuthority: () => true });
@@ -496,8 +596,7 @@ console.log(JSON.stringify({ node: process.version, platform: process.platform, 
 `;
       const result = await runNodeScript(
         [
-          "--import",
-          fileURLToPath(new URL("../../scripts/tsx.mjs", import.meta.url)),
+          ...resolveRuntimeWorkerArgv(ownerUrl, resolveTestNodeExecPath()).slice(0, -1),
           "--input-type=module",
           "--eval",
           source,

@@ -63,20 +63,16 @@ export const agentSessionSetContextReplacementHook: unique symbol = Symbol.for(
 );
 
 export abstract class AgentSessionCompaction extends AgentSessionInspection {
-  private onContextReplaced?: (tokensAfter: number) => void;
+  private onContextReplaced?: (tokensAfter: number, tokensBefore: number) => void;
   private assertContextReplacementActive?: () => void;
 
   [agentSessionSetContextReplacementHook](
-    callback: ((tokensAfter: number) => void) | undefined,
+    callback: ((tokensAfter: number, tokensBefore: number) => void) | undefined,
     assertActive?: () => void,
   ): void {
     this.onContextReplaced = callback;
     this.assertContextReplacementActive = assertActive;
   }
-
-  // =========================================================================
-  // Compaction
-  // =========================================================================
 
   /**
    * Manually compact the session context.
@@ -179,17 +175,13 @@ export abstract class AgentSessionCompaction extends AgentSessionInspection {
     }
   }
 
-  /**
-   * Cancel in-progress compaction (manual or auto).
-   */
+  /** Cancel in-progress compaction (manual or auto). */
   abortCompaction(): void {
     this.compactionAbortController?.abort();
     this.autoCompactionAbortController?.abort();
   }
 
-  /**
-   * Cancel in-progress branch summarization.
-   */
+  /** Cancel in-progress branch summarization. */
   abortBranchSummary(): void {
     this.branchSummaryAbortController?.abort();
   }
@@ -215,6 +207,8 @@ export abstract class AgentSessionCompaction extends AgentSessionInspection {
       return { status: "skipped", reason: formatNoModelSelectedMessage() };
     }
     const model = this.model;
+    const compactionThinkingLevel =
+      this.resolveCompactionThinkingLevel?.(model, this.thinkingLevel) ?? this.thinkingLevel;
 
     let auth: Awaited<ReturnType<typeof this.getCompactionRequestAuth>>;
     try {
@@ -325,7 +319,7 @@ export abstract class AgentSessionCompaction extends AgentSessionInspection {
         signal: options.signal,
         // Extension-owned compaction must use the same prepared model execution
         // context as the core path below or provider wrappers and reasoning drift.
-        thinkingLevel: this.thinkingLevel,
+        thinkingLevel: compactionThinkingLevel,
         streamFn: this.agent.streamFn,
       });
 
@@ -367,7 +361,7 @@ export abstract class AgentSessionCompaction extends AgentSessionInspection {
           auth.headers,
           coreInstructions || undefined,
           options.signal,
-          this.thinkingLevel,
+          compactionThinkingLevel,
           this.agent.streamFn,
           createCompactionRuntime((usage) => recordSessionModelUsage(this.sessionManager, usage)),
         );
@@ -434,6 +428,15 @@ export abstract class AgentSessionCompaction extends AgentSessionInspection {
       // Revalidate after admission too. In-memory transcripts have no SQLite
       // writer fence, and cancellation must not publish a replaced context.
       assertContextReplacementActive?.();
+      const replacementMessages = sanitizeCompactionReplayMessages(
+        projectReplacement(completedCompaction, completedCompaction.summary),
+      );
+      const tokensAfter = requestBudget
+        ? estimateCompactedRequestTokens(replacementMessages, {
+            ...requestBudget,
+            pendingTokens: 0,
+          })
+        : estimateContextTokens(replacementMessages).tokens;
       const entryId = this.sessionManager.appendCompaction(
         completedCompaction.summary,
         completedCompaction.firstKeptEntryId,
@@ -441,18 +444,13 @@ export abstract class AgentSessionCompaction extends AgentSessionInspection {
         completedCompaction.details,
         fromExtension,
         { itemId: options.itemId },
+        tokensAfter,
       );
       const sessionContext = this.sessionManager.buildSessionContext();
       // Compaction replaces the prefix; sanitize replay and publish accounting
       // before any await can let cancellation hide the committed replacement.
       this.agent.state.messages = sanitizeCompactionReplayMessages(sessionContext.messages);
-      const tokensAfter = requestBudget
-        ? estimateCompactedRequestTokens(this.agent.state.messages, {
-            ...requestBudget,
-            pendingTokens: 0,
-          })
-        : estimateContextTokens(this.agent.state.messages).tokens;
-      onContextReplaced?.(tokensAfter);
+      onContextReplaced?.(tokensAfter, completedCompaction.tokensBefore);
       return { entryId, tokensAfter };
     });
     if (committed === undefined) {
@@ -493,7 +491,6 @@ export abstract class AgentSessionCompaction extends AgentSessionInspection {
       return false;
     }
 
-    // Skip if message was aborted (user cancelled) - unless skipAbortedCheck is false
     if (skipAbortedCheck && assistantMessage.stopReason === "aborted") {
       return false;
     }
@@ -577,9 +574,6 @@ export abstract class AgentSessionCompaction extends AgentSessionInspection {
     return false;
   }
 
-  /**
-   * Internal: Run auto-compaction with events.
-   */
   private async runAutoCompaction(
     reason: Exclude<CompactionReason, "manual">,
     willRetry: boolean,
@@ -612,11 +606,7 @@ export abstract class AgentSessionCompaction extends AgentSessionInspection {
         settings,
         signal: abortController.signal,
       });
-      if (outcome.status === "skipped") {
-        this.emit({ type: "compaction_end", reason, itemId, outcome });
-        return false;
-      }
-      if (outcome.status === "aborted") {
+      if (outcome.status !== "completed") {
         this.emit({ type: "compaction_end", reason, itemId, outcome });
         return false;
       }
@@ -671,13 +661,6 @@ export abstract class AgentSessionCompaction extends AgentSessionInspection {
         this.autoCompactionAbortController = undefined;
       }
     }
-  }
-
-  /**
-   * Toggle auto-compaction setting.
-   */
-  setAutoCompactionEnabled(enabled: boolean): void {
-    this.settingsManager.setCompactionEnabled(enabled);
   }
 
   /** Whether auto-compaction is enabled */

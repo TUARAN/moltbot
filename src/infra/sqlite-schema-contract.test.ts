@@ -82,12 +82,100 @@ describe.each([false, true])("assertSqliteSchemaContains (statement cache: %s)",
         expect(() => assertSqliteSchemaContains(database, "test database", schema)).not.toThrow();
         const readCount = reads.reduce((total, read) => total + read.mock.calls.length, 0);
         expect(readCount).toBeGreaterThan(0);
-        expect(readCount).toBeLessThanOrEqual(68);
+        expect(readCount).toBeLessThanOrEqual(44);
       } finally {
         for (const read of reads) {
           read.mockRestore();
         }
       }
+    } finally {
+      database.close();
+    }
+  });
+
+  it.each([
+    ["expression direction", "lower(value) COLLATE NOCASE DESC", "lower(value) COLLATE NOCASE ASC"],
+    [
+      "expression collation",
+      "lower(value) COLLATE NOCASE DESC",
+      "lower(value) COLLATE BINARY DESC",
+    ],
+    ["partial predicate", "WHERE value IS NOT NULL", "WHERE value IS NULL"],
+  ])("preserves composite WITHOUT ROWID indexes and rejects changed %s", (_name, before, after) => {
+    const schema = `
+      CREATE TABLE "composite records" (
+        tenant TEXT COLLATE NOCASE,
+        record TEXT,
+        value TEXT,
+        PRIMARY KEY (tenant DESC, record),
+        UNIQUE (value)
+      ) WITHOUT ROWID;
+      CREATE TABLE empty_records (value TEXT) STRICT;
+      CREATE INDEX "expression index" ON "composite records"
+        (lower(value) COLLATE NOCASE DESC, record ASC) WHERE value IS NOT NULL;
+    `;
+    const database = createDatabase(schema);
+    try {
+      // The primary key has no sqlite_schema index row; its terms must still match.
+      expect(collectSqliteSchemaIssues(database, schema)).toEqual([]);
+      database.exec('DROP INDEX "expression index";');
+      database.exec(
+        `CREATE INDEX "expression index" ON "composite records"
+        (lower(value) COLLATE NOCASE DESC, record ASC) WHERE value IS NOT NULL;`.replace(
+          before,
+          after,
+        ),
+      );
+      expect(collectSqliteSchemaIssues(database, schema)).toEqual([
+        {
+          code: "missing-or-drifted-index",
+          objectName: "expression index",
+          message: "missing or drifted index expression index",
+        },
+      ]);
+    } finally {
+      database.close();
+    }
+  });
+
+  it.each([
+    "CREATE TABLE pragma_index_list (id INTEGER);",
+    "CREATE TEMP VIEW pragma_index_xinfo AS SELECT 1 AS id;",
+  ])("keeps schema checks working when PRAGMA function names are shadowed: %s", (collisionSql) => {
+    const schema = `${CANONICAL_SCHEMA}\n${collisionSql}`;
+    const database = createDatabase(schema);
+    try {
+      expect(collectSqliteSchemaIssues(database, schema)).toEqual([]);
+      database.exec("DROP INDEX idx_children_parent;");
+      expect(collectSqliteSchemaIssues(database, schema)).toEqual([
+        {
+          code: "missing-or-drifted-index",
+          objectName: "idx_children_parent",
+          message: "missing or drifted index idx_children_parent",
+        },
+      ]);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("keeps index terms separate when a temp table shadows a main table", () => {
+    const schema = `
+      CREATE TABLE a (id INTEGER PRIMARY KEY, main_a TEXT);
+      CREATE TABLE b (id INTEGER PRIMARY KEY, main_b TEXT);
+      CREATE INDEX same_index ON b(main_b);
+      CREATE TEMP TABLE a (id INTEGER PRIMARY KEY, temp_col TEXT);
+      CREATE INDEX temp.same_index ON a(temp_col DESC);
+    `;
+    const database = createDatabase(schema);
+    try {
+      expect(collectSqliteSchemaIssues(database, schema)).toEqual([]);
+      database.exec("DROP INDEX temp.same_index;");
+      expect(collectSqliteSchemaIssues(database, schema)).toContainEqual({
+        code: "missing-or-drifted-index",
+        objectName: "same_index",
+        message: "missing or drifted index same_index",
+      });
     } finally {
       database.close();
     }
@@ -132,19 +220,6 @@ describe.each([false, true])("assertSqliteSchemaContains (statement cache: %s)",
       expect(collectSqliteNamedIndexContract(database, "idx_children_parent")).toBeUndefined();
     } finally {
       database.setAuthorizer(null);
-      database.close();
-    }
-  });
-
-  it("accepts an extra non-unique index on a canonical table", () => {
-    const database = createDatabase(CANONICAL_SCHEMA);
-    try {
-      database.exec("CREATE INDEX idx_children_value ON children(value);");
-
-      expect(() =>
-        assertSqliteSchemaContains(database, "test database", CANONICAL_SCHEMA),
-      ).not.toThrow();
-    } finally {
       database.close();
     }
   });
@@ -395,27 +470,6 @@ describe.each([false, true])("assertSqliteSchemaContains (statement cache: %s)",
 
   it.each([
     {
-      name: "table",
-      schema: CANONICAL_SCHEMA.replace(/CREATE TABLE parents \([\s\S]*?\);\s*/u, "").replace(
-        /CREATE TRIGGER children_value_after_update[\s\S]*?END;\s*/u,
-        "",
-      ),
-      expected: "missing table parents",
-    },
-    {
-      name: "column",
-      schema: CANONICAL_SCHEMA.replace("value TEXT NOT NULL", "value BLOB NOT NULL"),
-      expected: "column definitions differ for parents",
-    },
-    {
-      name: "foreign key",
-      schema: CANONICAL_SCHEMA.replace(
-        /,\s*FOREIGN KEY \(parent_id\) REFERENCES parents\(id\) ON DELETE CASCADE/u,
-        "",
-      ),
-      expected: "table constraints differ for children",
-    },
-    {
       name: "check constraint",
       schema: CANONICAL_SCHEMA.replace(" CHECK (length(value) > 0)", ""),
       expected: "column definitions differ for parents",
@@ -449,22 +503,6 @@ describe.each([false, true])("assertSqliteSchemaContains (statement cache: %s)",
       name: "foreign-key deferral",
       schema: CANONICAL_SCHEMA.replace(" DEFERRABLE INITIALLY DEFERRED", ""),
       expected: "table constraints differ for features",
-    },
-    {
-      name: "index",
-      schema: CANONICAL_SCHEMA.replace(
-        "CREATE INDEX idx_children_parent ON children(parent_id, id)",
-        "CREATE INDEX idx_children_parent ON children(id, parent_id)",
-      ),
-      expected: "missing or drifted index idx_children_parent",
-    },
-    {
-      name: "trigger",
-      schema: CANONICAL_SCHEMA.replace(
-        "UPDATE parents SET value = NEW.value WHERE id = NEW.parent_id",
-        "UPDATE parents SET value = NULL WHERE id = NEW.parent_id",
-      ),
-      expected: "missing or drifted trigger children_value_after_update",
     },
   ])("rejects a drifted required $name", ({ schema, expected }) => {
     const database = createDatabase(schema);

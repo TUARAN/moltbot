@@ -3,9 +3,9 @@ import type {
   SessionCreatedVia,
 } from "../../config/sessions/session-entry-provenance.js";
 import type { AgentRuntimeIdentity } from "../agent-runtime-identity-token.js";
-import type { AgentRuntimeSpawnModelAutoSelection } from "../agent-runtime-session-spawn-context.js";
+import type { AgentRuntimeSessionSpawnContext } from "../agent-runtime-session-spawn-context.js";
 
-export type TrustedSessionCreation = {
+export type TrustedSessionCreation = Partial<AgentRuntimeSessionSpawnContext> & {
   skillLibrarySelections?: import("../../../packages/gateway-protocol/src/schema/skill-library.js").SkillLibrarySelection[];
   via: SessionCreatedVia;
   actor?: SessionCreatedActor;
@@ -13,16 +13,6 @@ export type TrustedSessionCreation = {
   sandbox?: "required";
   /** Exact spawning session retained separately from the stable actor identity. */
   requesterSessionKey?: string;
-  /** Immutable completion recipient for a spawn-owned visible session. */
-  completionOwnerSessionKey?: string;
-  /** Effective caller tool-policy snapshot for an in-process visible spawn. */
-  inheritedToolPolicy?: {
-    version: 1;
-    allow: string[];
-    deny: string[];
-  };
-  /** Config-selected model provenance from the trusted spawning tool. */
-  spawnModelAutoSelection?: AgentRuntimeSpawnModelAutoSelection;
 };
 
 /**
@@ -47,23 +37,24 @@ export function resolveOperatorSessionCreation(
   }
   const agentRuntimeIdentity = client?.internal?.agentRuntimeIdentity;
   if (options.allowTrustedHint && agentRuntimeIdentity?.sessionSpawnContext) {
+    const {
+      requesterProfileId,
+      completionOwnerSessionKey,
+      inheritedToolPolicy,
+      inheritedPermissionMode,
+      resolvedModel,
+      spawnModelAutoSelection,
+    } = agentRuntimeIdentity.sessionSpawnContext;
     return {
       via: "spawn",
       actor: { type: "agent", id: agentRuntimeIdentity.agentId },
       requesterSessionKey: agentRuntimeIdentity.sessionKey,
-      ...(agentRuntimeIdentity.sessionSpawnContext.completionOwnerSessionKey
-        ? {
-            completionOwnerSessionKey:
-              agentRuntimeIdentity.sessionSpawnContext.completionOwnerSessionKey,
-          }
-        : {}),
-      inheritedToolPolicy: agentRuntimeIdentity.sessionSpawnContext.inheritedToolPolicy,
-      ...(agentRuntimeIdentity.sessionSpawnContext.spawnModelAutoSelection
-        ? {
-            spawnModelAutoSelection:
-              agentRuntimeIdentity.sessionSpawnContext.spawnModelAutoSelection,
-          }
-        : {}),
+      ...(requesterProfileId ? { requesterProfileId } : {}),
+      ...(completionOwnerSessionKey ? { completionOwnerSessionKey } : {}),
+      inheritedToolPolicy,
+      ...(inheritedPermissionMode ? { inheritedPermissionMode } : {}),
+      ...(resolvedModel ? { resolvedModel } : {}),
+      ...(spawnModelAutoSelection ? { spawnModelAutoSelection } : {}),
     };
   }
   const profileId = client?.authenticatedUserProfile?.profileId;
