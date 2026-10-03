@@ -174,10 +174,7 @@ class CronPage extends OpenClawLightDomElement {
             void this.loadModelSuggestions(this.cron);
           }
         });
-        return () => {
-          stopSelection();
-          stopScope();
-        };
+        return () => [stopSelection, stopScope].forEach((stop) => stop());
       },
     )
     .effect(
