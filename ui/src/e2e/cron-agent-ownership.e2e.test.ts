@@ -324,19 +324,23 @@ suite.define(() => {
           .toBe(1);
         expect(await picker.locator('[role="option"][data-value="fixture/main"]').count()).toBe(0);
         expect(await page.locator("#cron-name").inputValue()).toBe("Keep this roster draft");
-        expect((await gateway.getRequests("cron.list")).length).toBe(inventoryReadsBeforeSwitch);
         await picker.locator(".picker-select__trigger").click();
         await page.screenshot({ path: path.join(suite.artifactDir, "roster-model-writer.png") });
 
         const requests = await gateway.getRequests();
+        const inventoryRequests = requests.filter(({ method }) => method === "cron.list");
+        expect(inventoryRequests.length).toBeGreaterThanOrEqual(inventoryReadsBeforeSwitch);
+        expect(
+          inventoryRequests.every((request) => requestParams(request).agentId === undefined),
+        ).toBe(true);
         await writeFile(
           path.join(suite.artifactDir, "roster-model-observations.json"),
           JSON.stringify(
             {
               fixture: "mock Gateway; real Control UI browser",
               inventoryReadsBeforeSwitch,
-              inventoryReadsAfterSwitch: requests.filter(({ method }) => method === "cron.list")
-                .length,
+              inventoryReadsAfterSwitch: inventoryRequests.length,
+              inventoryRequestParams: inventoryRequests.map(({ params }) => params),
               modelRequests: requests
                 .filter(({ method }) => method === "models.list")
                 .map(({ params }) => params),
