@@ -5,6 +5,7 @@ import {
 import { formatErrorMessage } from "../../infra/errors.js";
 import type { GatewayActiveWorkSnapshot } from "../../infra/gateway-active-work.js";
 import type { SubsystemLogger } from "../../logging/subsystem.js";
+import { beginGatewayShutdownCleanup } from "../../process/gateway-work-admission.js";
 import type { GatewayRunSignalAction, GatewayRunSignalRequest } from "./run-loop-request.js";
 import { formatDrainCounts, formatShutdownReason } from "./run-loop-shutdown-format.js";
 
@@ -28,6 +29,7 @@ export async function drainGatewayActiveWork({
   logger: Pick<SubsystemLogger, "info" | "warn">;
 }) {
   const { restartIntent } = request;
+  let drainTimedOut = false;
   const reportDrainSnapshot = createGatewayDrainReporter(
     request.action,
     drainTimeoutMs,
@@ -40,7 +42,6 @@ export async function drainGatewayActiveWork({
   if (request.action !== "stop") {
     let activeWorkAtDrainStart = 0;
     let activeRunsAtDrainStart = 0;
-    let drainTimedOut = false;
     await measureGatewayRestartTrace(
       "restart.drain",
       async () => {
@@ -109,6 +110,8 @@ export async function drainGatewayActiveWork({
     }
     logger.info("active-work drain settled; beginning server close");
   }
+  beginGatewayShutdownCleanup();
+  return drainTimedOut;
 }
 
 function createGatewayDrainReporter(

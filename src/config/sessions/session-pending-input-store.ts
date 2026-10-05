@@ -3,13 +3,11 @@ import {
   hasSqliteWorkerOutcomeUnknown,
   SqliteWorkerError,
 } from "../../infra/sqlite-worker-contract.js";
-import {
-  assertExistingDatabaseIdentity,
-  readDatabasePathIdentitySync,
-} from "../../infra/sqlite-worker-identity.js";
+import { assertExistingDatabaseIdentity } from "../../infra/sqlite-worker-identity.js";
 import type { SqliteWorkerOperationAdmission } from "../../infra/sqlite-worker-operation-admission.js";
 import type { RetainedWorkerTransactionAdmission } from "../../infra/sqlite-worker-operation-settlement.js";
 import { isIncognitoSessionKey } from "../../routing/session-key.js";
+import { IncognitoSessionSyncAccessError } from "../../state/incognito-session-error.js";
 import { registerOpenClawAgentDatabaseAsyncResource } from "../../state/openclaw-agent-db-resources.js";
 import {
   openOpenClawAgentDatabase,
@@ -24,18 +22,34 @@ import {
   resolveSqliteScope,
   toDatabaseOptions,
 } from "./session-accessor.sqlite-scope.js";
-import type {
-  PendingInputCustodyGrant,
-  PendingInputMutation,
-  PendingInputMutationReceipt,
-  PendingInputRead,
+import type { IncognitoSessionActor } from "./session-incognito-actor.js";
+import type { IncognitoSessionAuthority } from "./session-incognito-contract.js";
+import {
+  readPendingInputMutationReceipt,
+  type PendingInputCustodyGrant,
+  type PendingInputMutation,
+  type PendingInputRead,
 } from "./session-pending-input-operations.types.js";
-import { assertSessionStoreReadCandidate } from "./session-store-read-candidates.js";
+import {
+  assertSessionStoreReadCandidate,
+  captureSessionStoreCandidateIdentities,
+} from "./session-store-read-candidates.js";
 import { captureSessionStoreReadCandidates } from "./session-store-target-inventory.js";
 import { captureSessionTranscriptStorageEnvironment } from "./transcript-target-binding.js";
 
+export type PendingInputScope = SessionAccessScope & {
+  agentId: string;
+  sessionId: string;
+  /** Inactive until the atomic incognito activation supplies this captured owner. */
+  incognito?: {
+    actor: IncognitoSessionActor;
+    authority: IncognitoSessionAuthority;
+    admissionSignal?: AbortSignal;
+  };
+};
+
 export async function preparePendingInputStore(
-  scope: SessionAccessScope & { agentId: string; sessionId: string },
+  scope: PendingInputScope,
   assertCurrent: () => void,
 ) {
   const captured = {
@@ -44,20 +58,26 @@ export async function preparePendingInputStore(
   };
   const incognito = isIncognitoSessionKey(captured.sessionKey);
   const logical = resolveSqliteScope({ ...captured, storePath: undefined });
+  const binding = captured.incognito && { ...captured.incognito };
+  const actor = binding?.actor;
+  if (actor && binding) {
+    actor.assertCurrent();
+    binding.authority.assertCurrent();
+    if (
+      !incognito ||
+      actor.agentId !== logical.agentId ||
+      actor.path !== resolveOpenClawAgentSqlitePath(toDatabaseOptions(logical))
+    ) {
+      throw new Error("Pending input target differs from its captured incognito actor");
+    }
+  }
   const storePath =
     logical.path ??
     captured.storePath ??
     resolveOpenClawAgentSqlitePath(toDatabaseOptions(logical));
   const candidates = incognito ? [] : captureSessionStoreReadCandidates(storePath);
-  const identities = new Map(
-    candidates
-      .filter((candidate) => !candidate.scope)
-      .map((candidate) => {
-        const identity = readDatabasePathIdentitySync(candidate.path);
-        return [identity.canonicalPath, identity] as const;
-      }),
-  );
-  const resolved = await prepareSqliteScope(captured);
+  const identities = captureSessionStoreCandidateIdentities(candidates);
+  const resolved = actor ? resolveSqliteScope(captured) : await prepareSqliteScope(captured);
   assertCurrent();
   const options = {
     ...toDatabaseOptions(resolved),
@@ -70,6 +90,7 @@ export async function preparePendingInputStore(
     throw new Error("Pending input changed its captured database owner");
   }
   const assertSource = () => {
+    actor?.assertCurrent();
     if (identity) {
       assertSessionStoreReadCandidate(options.path, candidates);
       assertExistingDatabaseIdentity(options.path, identity.key, identity.birthtime);
@@ -124,6 +145,9 @@ export async function preparePendingInputStore(
     guard: (stage: "transaction" | "commit", facts?: PendingInputCustodyGrant) => void,
   ) => {
     assertOpen();
+    if (actor) {
+      throw new IncognitoSessionSyncAccessError("complete", "completeAsync");
+    }
     return mutatePendingInput(
       input,
       {
@@ -142,19 +166,21 @@ export async function preparePendingInputStore(
     assertCurrent: assertOpen,
     withAdmission<T>(operation: () => Promise<T>, reentrant: boolean): Promise<T> {
       let entered = false;
-      return runOpenClawAgentWriteAdmission(
-        options,
-        () => {
-          entered = true;
-          return operation();
-        },
-        reentrant,
-      ).catch((error: unknown) => {
-        if (!entered) {
-          unregister();
-        }
-        throw error;
-      });
+      const run = () =>
+        runOpenClawAgentWriteAdmission(
+          options,
+          () => {
+            entered = true;
+            return operation();
+          },
+          reentrant,
+        ).catch((error: unknown) => {
+          if (!entered) {
+            unregister();
+          }
+          throw error;
+        });
+      return actor ? actor.sessions.withSharedState(run) : run();
     },
     sessionKey: resolved.sessionKey,
     path: options.path,
@@ -183,6 +209,19 @@ export async function preparePendingInputStore(
         (async () => {
           assertOpen();
           assertCurrent();
+          if (actor && binding) {
+            return actor.sessions.readPendingInput(
+              {
+                assertCurrent: () => {
+                  assertOpen();
+                  assertCurrent();
+                  binding.authority.assertCurrent();
+                },
+                authorize: (stage, facts) => binding.authority.authorize?.(stage, facts),
+              },
+              input,
+            );
+          }
           if (incognito) {
             return readPendingInput(openOpenClawAgentDatabase(options), input);
           }
@@ -216,6 +255,20 @@ export async function preparePendingInputStore(
       return track(
         (async () => {
           assertOpen();
+          if (actor && binding) {
+            return actor.sessions.mutatePendingInput(
+              {
+                assertCurrent: () => {
+                  assertOpen();
+                  binding.authority.assertCurrent();
+                },
+                authorize: (stage, facts) => binding.authority.authorize?.(stage, facts),
+              },
+              input,
+              guard,
+              publish,
+            );
+          }
           if (incognito) {
             const result = nativeMutation(input, guard);
             publish?.();
@@ -227,23 +280,7 @@ export async function preparePendingInputStore(
                 retained: RetainedWorkerTransactionAdmission;
               }
             | undefined;
-          const readReceipt = (facts: unknown): PendingInputMutationReceipt | undefined => {
-            if (
-              !isRecord(facts) ||
-              facts.kind !== "pending-input-settlement" ||
-              facts.operation !== input.kind ||
-              facts.sessionKey !== input.sessionKey ||
-              facts.sessionId !== input.sessionId ||
-              facts.idempotencyKey !== input.idempotencyKey ||
-              facts.runId !== input.runId ||
-              facts.requestHash !== input.requestHash ||
-              facts.lifecycleGeneration !== input.lifecycleGeneration
-            ) {
-              return undefined;
-            }
-            // SAFETY: The exact paired kernel and admission own this tagged native receipt.
-            return facts as PendingInputMutationReceipt;
-          };
+          const readReceipt = (facts: unknown) => readPendingInputMutationReceipt(facts, input);
           const checkGrant = (stage: "transaction" | "commit", facts: unknown) => {
             if (
               !isRecord(facts) ||

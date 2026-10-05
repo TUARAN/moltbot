@@ -884,7 +884,7 @@ describe("private subagent completion processing receipts", () => {
   it.each(["resolved", "rejected", "abandoned"] as const)(
     "preserves executing private timeout facts (%s)",
     async (kind) => {
-      const consumed = createDeferred();
+      const consumed = createDeferred<ReturnType<typeof recorder>>();
       const release = createDeferred();
       agentCommandMock.mockImplementationOnce(async (input) => {
         const command = input as AgentCommandOpts;
@@ -892,7 +892,7 @@ describe("private subagent completion processing receipts", () => {
         const inputRecorder = recorder(input);
         await inputRecorder.persistApproved();
         inputRecorder.markSentToProvider?.();
-        consumed.resolve();
+        consumed.resolve(inputRecorder);
         // Hold the producer after abort so lifecycle projection cannot stand
         // in for execution settlement; abandoned work also outlives the grace.
         await release.promise;
@@ -915,7 +915,7 @@ describe("private subagent completion processing receipts", () => {
         (value) => ({ value }),
         (error: unknown) => ({ error: String(error) }),
       );
-      await consumed.promise;
+      const inputRecorder = await consumed.promise;
       const active = expectDefined(
         kernel.gatewayRequestContext.chatAbortControllers.get(runId),
         "executing controller",
@@ -961,10 +961,14 @@ describe("private subagent completion processing receipts", () => {
           // Keep the real terminal write and raw execution pending through timeout settlement.
           expect(terminalWrite).toBeInstanceOf(Promise);
           await clock.advanceBy(60_000);
+          await awaitGateBeforeSettlement(
+            expectDefined(inputRecorder.waitForPendingInputSettlement?.(), "input settlement"),
+            expectDefined(active.projectSessionTerminalPersistence, "terminal persistence"),
+            "Terminal persistence settled before its held write was released",
+          );
           expect(kernel.gatewayRequestContext.chatAbortControllers.get(runId)).toBe(active);
           expect(active.executionSettlement?.status).toBe("pending");
           expect(active.projectSessionTerminalPending).toBe(true);
-          expect(active.projectSessionTerminalPersistence).toBe(terminalWrite);
           expect(JSON.parse(String(completions()[0]?.outcome_json))).toMatchObject({
             reason: "timed_out",
             status: "timeout",
@@ -996,6 +1000,7 @@ describe("private subagent completion processing receipts", () => {
         }),
       ).toBe(true);
       expect(kernel.gatewayRequestContext.chatAbortControllers.has(runId)).toBe(false);
+      expect(active.projectSessionTerminalPersisted).toBe(true);
       if (kind === "resolved") {
         expect(outcome).toMatchObject({
           reason: "hard_timeout",

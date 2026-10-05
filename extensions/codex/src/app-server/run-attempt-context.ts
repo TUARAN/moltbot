@@ -25,10 +25,8 @@ import { joinPresentSections } from "./developer-instruction-sections.js";
 import { isSystemAgentOnlyCodexDynamicToolAllowlist } from "./dynamic-tool-profile.js";
 import type { CodexAttemptRuntime } from "./run-attempt-runtime.js";
 import type { CodexAttemptTools } from "./run-attempt-tool-setup.js";
-import {
-  buildDeveloperInstructions,
-  type CodexContextEngineThreadBootstrapProjection,
-} from "./thread-lifecycle.js";
+import type { CodexContextEngineThreadBootstrapProjection } from "./thread-context-engine.js";
+import { buildDeveloperInstructions } from "./thread-prompt.js";
 
 export async function prepareCodexAttemptContext(
   runtime: CodexAttemptRuntime,
@@ -74,8 +72,10 @@ export async function prepareCodexAttemptContext(
       ...(transcriptReadFence ? { admission: transcriptReadFence } : {}),
     });
     connection.runAbortController.signal.throwIfAborted();
-    connection.assertCurrent();
-    return messages;
+    return await connection.withCurrent(() => {
+      connection.assertCurrent();
+      return messages;
+    });
   };
   const historyState = {
     messages:
@@ -194,6 +194,8 @@ export async function prepareCodexAttemptContext(
   const baseDeveloperInstructions = joinPresentSections(
     buildDeveloperInstructions(runtimeParams, {
       dynamicTools: toolBridge.availableSpecs,
+      nativeCodeModeOnlyEnabled:
+        runtime.nativeToolSurfaceEnabled && connection.appServer.codeModeOnly,
     }),
     agentWorkspaceDeveloperInstructions,
   );

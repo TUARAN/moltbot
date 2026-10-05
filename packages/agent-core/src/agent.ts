@@ -9,7 +9,11 @@ import type {
 } from "@openclaw/llm-core";
 import { runAgentLoop, runAgentLoopContinue } from "./agent-loop.js";
 import { TranscriptNotContinuableError } from "./errors.js";
-import { attachInternalSyncSteeringGetter, getInternalBeforeToolBatch } from "./internal-hooks.js";
+import {
+  attachInternalSyncSteeringGetter,
+  getInternalBeforeToolBatch,
+  getInternalToolTurnCompletion,
+} from "./internal-hooks.js";
 import { isOpenClawSystemUpdateMessage } from "./operator-messages.js";
 import { resolveAgentReasoningOption } from "./reasoning.js";
 import { type AgentCoreStreamRuntimeDeps, resolveAgentCoreStreamFn } from "./runtime-deps.js";
@@ -603,6 +607,7 @@ export class Agent {
       toolExecution: this.toolExecution,
       beforeToolCall: this.beforeToolCall,
       beforeToolBatch: getInternalBeforeToolBatch(this),
+      completesToolTurn: getInternalToolTurnCompletion(this),
       toolLoopRecoveryState: this.toolLoopRecoveryState,
       resolveDeferredTool: this.resolveDeferredTool,
       afterToolCall: this.afterToolCall,
@@ -646,6 +651,9 @@ export class Agent {
     try {
       await executor(abortController.signal);
     } catch (error) {
+      if (this.runtime?.isLocalError?.(error)) {
+        throw error;
+      }
       await this.handleRunFailure(error, abortController.signal.aborted);
     } finally {
       this.finishRun();

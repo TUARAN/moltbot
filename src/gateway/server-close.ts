@@ -9,6 +9,7 @@ import { fenceSessionSuspensionWritesForGatewayShutdown } from "../agents/sessio
 import { closeSwarmScheduler } from "../agents/subagents/swarm/swarm-scheduler.js";
 import { type ChannelId, listChannelPlugins } from "../channels/plugins/index.js";
 import { closeSessionTranscriptReconcileWorkerPool } from "../config/sessions/session-transcript-reconcile-pool.js";
+import { drainCronReceiptAuthority } from "../cron/store/receipt-authority-owner.js";
 import { createInternalHookEvent, triggerInternalHook } from "../hooks/internal-hooks.js";
 import { formatErrorMessage, hasErrnoCode } from "../infra/errors.js";
 import type { HeartbeatRunner } from "../infra/heartbeat-runner.js";
@@ -24,6 +25,7 @@ import { AsyncWorkScope } from "../shared/async-work-scope.js";
 import { drainGlobalSingletonLifecycleState } from "../shared/global-singleton.js";
 import { settlesWithin } from "../shared/settle-within.js";
 import { closeOpenClawAgentDatabasesAsync } from "../state/openclaw-agent-db-lifecycle.js";
+import { withAgentDatabaseCloseFence } from "../state/openclaw-agent-db-resources.js";
 import {
   collectGatewayProcessMemoryUsageMb,
   markGatewayRestartTrace,
@@ -62,9 +64,14 @@ type ShutdownResult = {
 };
 
 function createCloseStepTimer(reason: string) {
-  return <T>(name: string, run: () => Promise<T> | T) => {
+  return async <T>(name: string, run: () => Promise<T> | T) => {
+    const startedAt = Date.now();
     markGatewayRestartTrace(`restart.close.${name}.begin`);
-    return measureGatewayRestartTrace(`restart.close.${name}`, run, [["reason", reason]]);
+    try {
+      return await measureGatewayRestartTrace(`restart.close.${name}`, run, [["reason", reason]]);
+    } finally {
+      shutdownLog.info(`shutdown step ${name} settled after ${Date.now() - startedAt}ms`);
+    }
   };
 }
 
@@ -248,6 +255,8 @@ export type GatewayCloseParams = {
 };
 
 export type GatewayClosePrepareParams = GatewayRunShutdownParams & {
+  preparePluginRegistryClose: ReturnType<typeof createPluginRegistryOwner>["prepareClose"];
+  agentUnsub?: GatewayCloseParams["agentUnsub"];
   updateCheckStop?: (() => Promise<void> | void) | null;
   configReloader: { stop: () => Promise<void> };
   getPendingReplyCount: () => number;
@@ -306,9 +315,11 @@ export async function prepareGatewayClose(
     await measureCloseStep("config-reloader", () =>
       shutdownStep("config-reloader", () => params.configReloader.stop(), warnings),
     );
-    await triggerLifecycleHook("shutdown", GATEWAY_SHUTDOWN_HOOK_TIMEOUT_MS);
-    if (restartExpectedMs !== null) {
-      await triggerLifecycleHook("pre-restart", GATEWAY_PRE_RESTART_HOOK_TIMEOUT_MS);
+    if (!opts?.onProcessExitReady) {
+      await triggerLifecycleHook("shutdown", GATEWAY_SHUTDOWN_HOOK_TIMEOUT_MS);
+      if (restartExpectedMs !== null) {
+        await triggerLifecycleHook("pre-restart", GATEWAY_PRE_RESTART_HOOK_TIMEOUT_MS);
+      }
     }
     const drainTimeoutMs =
       typeof opts?.drainTimeoutMs === "number" && Number.isFinite(opts.drainTimeoutMs)
@@ -322,6 +333,31 @@ export async function prepareGatewayClose(
         warnings,
       }),
     );
+    // ACPX owns agent-process cleanup; memory retirement must not overtake its drain.
+    await measureCloseStep("acp-session-manager", () =>
+      shutdownStep(
+        "acp-session-manager",
+        () => disposeAcpSessionManager("gateway-shutdown"),
+        warnings,
+      ),
+    );
+    // Memory owns database borrows independent of stalled model/tool finalizers.
+    // The registry retains and later joins this same preparation before retirement.
+    const memoryPreparation = cleanupWork.track(params.preparePluginRegistryClose);
+    void memoryPreparation.catch((error: unknown) => {
+      shutdownLog.warn(`memory preparation failed during shutdown: ${formatErrorMessage(error)}`);
+      recordShutdownWarning(warnings, "memory-managers");
+    });
+    if (opts?.onProcessExitReady) {
+      await measureCloseStep("terminal-persistence", () => params.agentUnsub?.());
+      await measureCloseStep("memory-preparation", () => memoryPreparation);
+      // Keep every path fenced through host lock release and exit: a per-path
+      // idle receipt alone does not prevent accepted cleanup from reopening it.
+      await withAgentDatabaseCloseFence({}, async () => {
+        await measureCloseStep("agent-databases", () => closeOpenClawAgentDatabasesAsync());
+        await measureCloseStep("process-exit", opts.onProcessExitReady!);
+      });
+    }
     return { start, notice, warnings, cleanupWork };
   } catch (error) {
     await cleanupWork.drain();
@@ -388,15 +424,6 @@ async function closeGatewayResources(
     if (params.bonjourStop) {
       await shutdownStep("bonjour", () => params.bonjourStop!(), warnings);
     }
-    // ACPX owns agent-process cleanup, so plugin teardown must not overtake
-    // the manager drain even when cancellation and handle close are slow.
-    await measureCloseStep("acp-session-manager", () =>
-      shutdownStep(
-        "acp-session-manager",
-        () => disposeAcpSessionManager("gateway-shutdown"),
-        warnings,
-      ),
-    );
     if (params.pluginServices) {
       const cleanup = cleanupWork.track(() =>
         Promise.resolve().then(async () => {
@@ -485,6 +512,7 @@ async function closeGatewayResources(
       warnings,
     );
     await shutdownStep("cron-maintenance", () => params.stopCronMaintenance?.(), warnings);
+    await shutdownStep("cron-receipt-authority", () => drainCronReceiptAuthority(), warnings);
     if (params.agentUnsub) {
       await shutdownStep("agent-unsub", () => params.agentUnsub!(), warnings);
     }
@@ -639,11 +667,12 @@ async function closeGatewayResources(
       }
       for (const { pluginId, hookId, error } of registryClose.pluginFailures) {
         recordShutdownWarning(warnings, `plugin/${pluginId}`);
-        resourceCleanupErrors.push(
-          new Error(`Plugin ${pluginId} cleanup failed (${hookId}): ${formatErrorMessage(error)}`, {
-            cause: error,
-          }),
-        );
+        const message = `Plugin ${pluginId} cleanup failed (${hookId}): ${formatErrorMessage(error)}`;
+        shutdownLog.warn(message);
+        // Retirement has joined admitted work; callback faults are diagnostic, unlike lost state.
+        if (hookId === "session-store") {
+          resourceCleanupErrors.push(new Error(message, { cause: error }));
+        }
       }
     } catch (error) {
       resourceCleanupErrors.push(error);
