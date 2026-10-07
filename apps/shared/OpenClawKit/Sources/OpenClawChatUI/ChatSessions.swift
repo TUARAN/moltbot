@@ -480,7 +480,7 @@ public struct OpenClawChatSessionsDefaults: Codable, Sendable {
     public let thinkingLevels: [OpenClawChatThinkingLevelOption]?
     public let thinkingOptions: [String]?
     public let thinkingDefault: String?
-    public let mainSessionKey: String?
+    public var mainSessionKey: String?
 
     public init(
         modelProvider: String? = nil,
@@ -539,6 +539,7 @@ public struct OpenClawChatSessionGroup: Codable, Identifiable, Sendable, Hashabl
 
 public struct OpenClawChatSessionGroupsResponse: Codable, Sendable, Equatable {
     public let groups: [OpenClawChatSessionGroup]
+    public var sectionOrder: [String]?
 }
 
 public struct OpenClawChatSessionGroupsMutationResponse: Codable, Sendable, Equatable {

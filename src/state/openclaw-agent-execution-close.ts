@@ -10,11 +10,12 @@ import {
 } from "../infra/sqlite-worker-contract.js";
 import type { OpenClawAgentDatabase } from "./openclaw-agent-db-contract.js";
 import { closeOpenClawAgentDatabaseByPath } from "./openclaw-agent-db-lifecycle.js";
-import type { AgentDatabaseExecutionIdentity } from "./openclaw-agent-execution-contract.js";
+import type { AgentDatabaseFileExecutionIdentity } from "./openclaw-agent-execution-contract.js";
 
 type AgentDatabaseExecutionCloseState = {
   database: OpenClawAgentDatabase | undefined;
-  identity: AgentDatabaseExecutionIdentity | undefined;
+  identity: AgentDatabaseFileExecutionIdentity | undefined;
+  releasePreparations: readonly (() => void)[];
   closeDomain: () => void;
   releaseBorrow: (() => void) | undefined;
 };
@@ -59,6 +60,7 @@ export function createAgentDatabaseExecutionCloser(
 function closeAgentDatabaseExecution({
   database,
   identity,
+  releasePreparations,
   closeDomain,
   releaseBorrow,
   releaseSharedBorrow,
@@ -68,6 +70,7 @@ function closeAgentDatabaseExecution({
   let checkpoint: SqliteWalCheckpointSnapshot | undefined;
   const errors: unknown[] = [];
   for (const cleanup of [
+    ...releasePreparations,
     closeDomain,
     () => {
       if (!database) {
