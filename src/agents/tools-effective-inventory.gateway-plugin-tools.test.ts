@@ -113,7 +113,7 @@ module.exports = {
       const probes: Probe[] = [];
       let closeOnToolFactory = false;
       let closing: Promise<unknown> | undefined;
-      let owner: ReturnType<typeof createPluginRegistryOwner> | undefined;
+      const lifecycle: { close?: () => Promise<unknown> } = {};
       (globalThis as Record<string, unknown>)[probeKey] = (event: string, tools?: string[]) => {
         const requestRegistry = getPluginRuntimeGatewayRequestScope()?.pluginRegistry;
         const ownerCurrent =
@@ -133,9 +133,9 @@ module.exports = {
           ...(tools ? { tools } : {}),
           ...(toolRecord ? { retainedWork: getPluginInstance(toolRecord)?.retainedWorkCount } : {}),
         });
-        if (event === "tool-factory" && closeOnToolFactory && owner) {
+        if (event === "tool-factory" && closeOnToolFactory && lifecycle.close) {
           closeOnToolFactory = false;
-          closing = owner.close();
+          closing = lifecycle.close();
         }
       };
       const config: OpenClawConfig = {
@@ -175,13 +175,14 @@ module.exports = {
         providerPluginId,
         toolPluginId,
       ]);
-      owner = createPluginRegistryOwner(root, state.workspaceDir);
+      const owner = createPluginRegistryOwner(root, state.workspaceDir);
+      lifecycle.close = owner.close;
       const warnings: string[] = [];
       const warn = vi.spyOn(logger, "logWarn").mockImplementation((message) => {
-        warnings.push(String(message));
+        warnings.push(message);
       });
       const resolveInventory = async (inventoryConfig: OpenClawConfig, normalizeProvider = true) =>
-        await withPluginRuntimeRegistryScope(owner!.registry, async () => {
+        await withPluginRuntimeRegistryScope(owner.registry, async () => {
           const acquired = await acquireEffectiveToolInventoryRuntimeModelContext({
             cfg: inventoryConfig,
             agentId: "main",
