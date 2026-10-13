@@ -183,6 +183,20 @@ describe("classifyEmbeddedAgentRunResultForModelFallback", () => {
     });
   });
 
+  it("classifies Google text-only 503 result payloads before fallback settlement", () => {
+    const rawError =
+      "Google Generative AI API error (503): The service is currently unavailable. [code=UNAVAILABLE]";
+
+    const result = classifyErrorPayload("google", "gemini-3.1-pro-preview", rawError);
+
+    expect(result).toEqual({
+      message: `google/gemini-3.1-pro-preview ended with a provider error: ${rawError}`,
+      reason: "server_error",
+      code: "embedded_error_payload",
+      rawError,
+    });
+  });
+
   it("classifies structured provider upstream_error payloads as fallback-worthy", () => {
     const rawError =
       '{"error":{"message":"Upstream request failed","type":"upstream_error","param":"","code":null}}';
