@@ -1,12 +1,10 @@
 import { readSessionEntryReadOnlyInWorker } from "../../config/sessions/session-entry-read-runtime.js";
-import type { HeartbeatWakeRequest } from "../../infra/heartbeat-wake.js";
 import { normalizeAgentId, resolveAgentIdFromSessionKey } from "../../routing/session-key.js";
 import type { OpenClawStateWorkerContext } from "../../state/openclaw-state-worker-context.types.js";
 import { deliveryContextFromSession } from "../../utils/delivery-context.read.js";
 import type { DeliveryContext } from "../../utils/delivery-context.types.js";
 import type { CronActiveJobMarker } from "../active-jobs.js";
 import type { CronCompletionDeliveryFence } from "../delivery-attempt-fence.js";
-import type { CronRunReceiptSettlementDisposition } from "../store/run-receipt-store.js";
 import type { CronRunReceiptHandle } from "../store/run-receipt.types.js";
 import type {
   CronAgentExecutionPhaseUpdate,
@@ -20,7 +18,7 @@ import type {
   CronRunDeliveryResult,
   CronRunTelemetry,
 } from "../types.js";
-import type { CronServiceState } from "./state.js";
+import type { CronIdleAdmissionSource, CronIdleAdmissionWait, CronServiceState } from "./state.js";
 
 export const MAX_CRON_TIMER_DELAY_MS = 60_000;
 
@@ -49,10 +47,10 @@ export type TimedCronRunOutcome = CronJobExecutionResult & {
   activeJobMarker?: CronActiveJobMarker;
   runReceipt?: CronRunReceiptHandle;
   runReceiptContext?: OpenClawStateWorkerContext;
-  receiptSettlementDisposition?: CronRunReceiptSettlementDisposition;
   request?: {
     executionJob: CronJob;
     preserveCadence: boolean;
+    onExitWatcherCompletion?: boolean;
     scheduleOwnershipAtMs: number;
     runId?: string;
     terminalTracker?: { emitted: boolean };
@@ -83,20 +81,17 @@ export type IsolatedAgentSetupTimeoutResult = {
 };
 
 export type ExecuteJobCoreOptions = {
+  /** Queue admission supplies this fact so receipt I/O cannot reorder payload starts. */
+  migrationPending?: boolean;
+  idleAdmission?: CronIdleAdmissionSource;
+  waitForIdle?: CronIdleAdmissionWait;
   deliveryAttemptFence?: CronCompletionDeliveryFence;
   activeJobMarker?: CronActiveJobMarker;
-  onPayloadExecutionStarted?: () => void;
   onExecutionStarted?: (info?: CronAgentExecutionStarted) => void;
   onExecutionPhase?: (info: CronAgentExecutionPhaseUpdate) => void;
   onLaneWait?: (info?: { waiting?: boolean }) => void;
-  onHeartbeatExecutionStarted?: (opts: HeartbeatWakeRequest & { agentId: string }) =>
-    | {
-        onAttemptStarted?: () => void;
-        onQueued?: () => void;
-      }
-    | undefined;
   executionIdentity?: import("./state.js").CronExecutionIdentityAdmission;
-  /** Revalidates the durable run fence after awaited planning and before effects. */
+  /** Revalidates live Gateway admission after awaited planning and before effects. */
   assertRunCurrent?: () => Promise<void>;
   streamBatch?: string;
   // Source definition and logical identity are an inseparable admission claim.

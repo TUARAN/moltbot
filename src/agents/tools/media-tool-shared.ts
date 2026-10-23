@@ -25,6 +25,7 @@ import {
   listAvailableManifestContractValues,
   loadManifestContractSnapshot,
 } from "../../plugins/manifest-contract-eligibility.js";
+import { warnPluginSdkDeprecation } from "../../plugins/sdk-deprecation.js";
 import { resolveUserPath } from "../../utils.js";
 import { buildTimeoutAbortSignal } from "../../utils/fetch-timeout.js";
 import type { AuthProfileStore } from "../auth-profiles/types.js";
@@ -35,8 +36,10 @@ import {
 } from "../sandbox-media-paths.js";
 import type { ToolFsPolicy } from "../tool-fs-policy.js";
 import { normalizeWorkspaceDir } from "../workspace-dir.js";
+import type { AgentWorkspaceReadiness } from "../workspace-readiness.js";
 import {
   ToolInputError,
+  readFiniteNumberParam,
   readNumberParam,
   readPositiveIntegerParam,
   readStringArrayParam,
@@ -135,6 +138,11 @@ export function isCapabilityProviderConfigured<T extends CapabilityProvider>(par
     return false;
   }
   if (provider?.isConfigured) {
+    warnPluginSdkDeprecation({
+      family: "provider-sync-configuration",
+      method: "media provider isConfigured",
+      replacement: "isConfiguredAsync",
+    });
     return provider.isConfigured({
       cfg: params.cfg,
       agentDir: params.agentDir,
@@ -463,11 +471,20 @@ export async function resolveMediaToolReferenceAccess(params: {
           inboundFallbackDir: "media/inbound",
         })
       : { resolved: resolveHostPath() };
+  // A policy that lets read open host files lets media tools load the same file.
+  const hostReadRoot =
+    params.fsPolicy?.workspaceOnly === false &&
+    !params.sandbox &&
+    !params.isDataUrl &&
+    path.isAbsolute(pathInfo.resolved)
+      ? [path.dirname(pathInfo.resolved)]
+      : [];
   return {
     resolvedPath: params.isDataUrl ? null : pathInfo.resolved,
     localRoots: uniqueStrings([
       ...(workspaceOnly ? hostRoots : [...getDefaultLocalRootsCore(), ...hostRoots]),
       ...(params.fsPolicy?.readOnlyRoots ?? []),
+      ...hostReadRoot,
     ]),
     ...(pathInfo.rewrittenFrom ? { rewrittenFrom: pathInfo.rewrittenFrom } : {}),
   };
@@ -509,6 +526,7 @@ export async function loadMediaToolReferences<T>(params: {
   maxBytes: number;
   ssrfPolicy?: SsrFPolicy;
   signal?: AbortSignal;
+  workspaceReadiness?: AgentWorkspaceReadiness;
   mapMedia: (media: LoadedToolReferenceMedia) => T;
   mapRemote?: (url: string) => T;
 }): Promise<LoadedMediaToolReference<T>[]> {
@@ -528,6 +546,16 @@ export async function loadMediaToolReferences<T>(params: {
     if (params.sandbox && reference.isHttpUrl) {
       const label = params.toolName === "image_generate" ? "" : `${params.expectedKind} `;
       throw new ToolInputError(`Sandboxed ${params.toolName} does not allow remote ${label}URLs.`);
+    }
+    const workspaceReadiness =
+      !reference.isHttpUrl && !reference.isDataUrl && !reference.isMediaStoreUrl
+        ? params.workspaceReadiness
+        : undefined;
+    if (workspaceReadiness) {
+      workspaceReadiness.assertCurrent();
+      await workspaceReadiness.waitUntilReady();
+      params.signal?.throwIfAborted();
+      workspaceReadiness.assertCurrent();
     }
     const resolvedInput = !params.sandbox && input.startsWith("~") ? resolveUserPath(input) : input;
     if (reference.isHttpUrl && params.mapRemote) {
@@ -549,41 +577,51 @@ export async function loadMediaToolReferences<T>(params: {
       );
     }
     let media: LoadedToolReferenceMedia;
-    if (reference.isDataUrl) {
-      const { decodeDataUrl } = await import("./image-tool.helpers.js");
-      params.signal?.throwIfAborted();
-      media = decodeDataUrl(resolvedInput, { maxBytes: params.maxBytes });
-    } else {
-      const { loadWebMedia } = await import("../../media/web-media.js");
-      params.signal?.throwIfAborted();
-      const timeout =
-        params.toolName === "music_generate" && !params.sandbox
-          ? buildTimeoutAbortSignal({
-              timeoutMs: 30_000,
-              operation: "music-generate.reference-fetch",
-              ...(params.signal ? { signal: params.signal } : {}),
-              ...(reference.isHttpUrl ? { url: resolvedPath ?? resolvedInput } : {}),
-            })
-          : undefined;
-      try {
-        media = await loadWebMedia(resolvedPath ?? resolvedInput, {
-          maxBytes: params.maxBytes,
-          ...(params.sandbox
-            ? {
-                sandboxValidated: true,
-                readFile: createSandboxBridgeReadFile({ sandbox: params.sandbox }),
-              }
-            : { localRoots, ssrfPolicy: params.ssrfPolicy }),
-          ...(params.toolName === "image_generate" && reference.isHttpUrl
-            ? { readIdleTimeoutMs: REMOTE_MEDIA_READ_IDLE_TIMEOUT_MS }
-            : {}),
-          ...(timeout?.signal || params.signal
-            ? { requestInit: { signal: timeout?.signal ?? params.signal } }
-            : {}),
-        });
-      } finally {
-        timeout?.cleanup();
+    try {
+      if (reference.isDataUrl) {
+        const { decodeDataUrl } = await import("./image-tool.helpers.js");
+        params.signal?.throwIfAborted();
+        media = decodeDataUrl(resolvedInput, { maxBytes: params.maxBytes });
+      } else {
+        const { loadWebMedia } = await import("../../media/web-media.js");
+        params.signal?.throwIfAborted();
+        workspaceReadiness?.assertCurrent();
+        const timeout =
+          params.toolName === "music_generate" && !params.sandbox
+            ? buildTimeoutAbortSignal({
+                timeoutMs: 30_000,
+                operation: "music-generate.reference-fetch",
+                ...(params.signal ? { signal: params.signal } : {}),
+                ...(reference.isHttpUrl ? { url: resolvedPath ?? resolvedInput } : {}),
+              })
+            : undefined;
+        try {
+          media = await loadWebMedia(resolvedPath ?? resolvedInput, {
+            maxBytes: params.maxBytes,
+            ...(params.sandbox
+              ? {
+                  sandboxValidated: true,
+                  readFile: createSandboxBridgeReadFile({ sandbox: params.sandbox }),
+                }
+              : { localRoots, ssrfPolicy: params.ssrfPolicy }),
+            ...(params.toolName === "image_generate" && reference.isHttpUrl
+              ? { readIdleTimeoutMs: REMOTE_MEDIA_READ_IDLE_TIMEOUT_MS }
+              : {}),
+            ...(timeout?.signal || params.signal
+              ? { requestInit: { signal: timeout?.signal ?? params.signal } }
+              : {}),
+          });
+        } finally {
+          timeout?.cleanup();
+        }
       }
+    } catch (error) {
+      params.signal?.throwIfAborted();
+      // Generated outputs share this cap, so name the input that failed.
+      const message = `${params.expectedKind} reference ${loaded.length + 1} could not be loaded: ${error instanceof Error ? error.message : String(error)}`;
+      throw error instanceof ToolInputError
+        ? new ToolInputError(message)
+        : new Error(message, { cause: error });
     }
     params.signal?.throwIfAborted();
     if (media.kind !== params.expectedKind) {
@@ -617,16 +655,22 @@ export function resolveMediaToolInboundRoots(options?: {
   );
 }
 
-export function resolvePromptAndModelOverride(
+export function resolveMediaAnalysisParams(
   args: Record<string, unknown>,
   defaultPrompt: string,
 ): {
   prompt: string;
   modelOverride?: string;
+  maxBytesMb?: number;
 } {
   const prompt = normalizeOptionalString(args.prompt) ?? defaultPrompt;
   const modelOverride = normalizeOptionalString(args.model);
-  return { prompt, modelOverride };
+  const maxBytesMb = readFiniteNumberParam(args, "maxBytesMb", {
+    min: 0,
+    minExclusive: true,
+    message: "maxBytesMb must be greater than 0",
+  });
+  return { prompt, modelOverride, maxBytesMb };
 }
 
 export function buildTextToolResult(

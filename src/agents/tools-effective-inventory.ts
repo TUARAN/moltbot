@@ -29,7 +29,7 @@ import { getPluginRuntimeLoadContext } from "../plugins/runtime/load-context.js"
 import { resolveAgentDir, resolveAgentWorkspaceDir, resolveSessionAgentId } from "./agent-scope.js";
 import { createOpenClawCodingToolsInternalAsync } from "./agent-tools.js";
 import { hasAnyAuthProfileStoreSourceAsync } from "./auth-profiles/source-check.js";
-import { resolveConversationCapabilityProfile } from "./conversation-capability-profile.js";
+import { prepareConversationCapabilityProfile } from "./conversation-capability-profile.js";
 import { resolveModelAsync } from "./embedded-agent-runner/model.js";
 import { resolveBundledStaticCatalogModel } from "./embedded-agent-runner/model.static-catalog.js";
 import { normalizeStaticProviderModelId } from "./model-ref-shared.js";
@@ -70,7 +70,7 @@ function buildToolInventoryNotices(params: {
   cfg: OpenClawConfig;
   profile: string;
   entries: EffectiveToolInventoryEntry[];
-  effectivePolicy: ReturnType<typeof resolveConversationCapabilityProfile>["policy"];
+  effectivePolicy: Awaited<ReturnType<typeof prepareConversationCapabilityProfile>>["policy"];
 }): EffectiveToolInventoryNotice[] | undefined {
   const hasBrowserTool = params.entries.some(
     (entry) => normalizeToolPolicyName(entry.id) === "browser",
@@ -125,18 +125,6 @@ function buildToolInventoryNotices(params: {
   return undefined;
 }
 
-function resolveConfiguredFallbackApi(
-  providerConfig: { api?: string; baseUrl?: string } | undefined,
-): string {
-  const explicitApi = normalizeOptionalString(providerConfig?.api);
-  if (explicitApi) {
-    return explicitApi;
-  }
-  return normalizeOptionalString(providerConfig?.baseUrl)
-    ? "openai-completions"
-    : "openai-responses";
-}
-
 /** Resolves configured or bundled metadata without starting provider discovery. */
 function resolveStaticToolInventoryRuntimeModelContext(params: {
   cfg: OpenClawConfig;
@@ -170,7 +158,9 @@ function resolveStaticToolInventoryRuntimeModelContext(params: {
       normalizeOptionalString(configuredModel.api) ??
       normalizeOptionalString(providerConfig?.api) ??
       normalizeOptionalString(bundledStaticModel?.api) ??
-      resolveConfiguredFallbackApi(providerConfig);
+      (normalizeOptionalString(providerConfig?.baseUrl)
+        ? "openai-completions"
+        : "openai-responses");
     runtimeModel = {
       ...bundledStaticModel,
       ...configuredModel,
@@ -380,12 +370,12 @@ export async function resolveEffectiveToolInventory(
 
   const capabilityProfile =
     params.conversationCapabilityProfile ??
-    resolveConversationCapabilityProfile({
+    (await prepareConversationCapabilityProfile({
       ...params,
       config: params.cfg,
       agentId,
       agentAccountId: params.accountId,
-    });
+    }));
   const diagnostics = createToolAccessDiagnostics({ profiles: capabilityProfile.policy.profiles });
   const effectiveTools = await withGatewayToolInventoryScope(params.cfg, workspaceDir, () =>
     createOpenClawCodingToolsInternalAsync(
