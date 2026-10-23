@@ -92,7 +92,6 @@ function AppSidebarContent(
   const projection = projectSource(owner, {
     read: (current) => current,
     subscribe: (current, notify) => {
-      current.catalogRendererImport.schedule();
       const stops = [
         current.subscribe(notify),
         context.chatSubmissions.subscribeCreate(notify),
@@ -305,9 +304,9 @@ function AppSidebarContent(
     return () => {
       cancelAnimationFrame(frame);
       owner.sessionData.disconnect(owner.isConnected);
+      disconnectSidebarOwner(host);
     };
   });
-  onCleanup(() => disconnectSidebarOwner(host));
   return content;
 }
 
