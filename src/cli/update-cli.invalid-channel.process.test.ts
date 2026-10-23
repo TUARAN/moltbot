@@ -5,30 +5,28 @@ import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 import { cliRecoveryEntrypoints } from "./cli-entrypoint.test-support.js";
 import { runCliProcessChild } from "./cli-process-child.test-helpers.js";
 
-it.each(
-  [
-    ...["repair", "finalize"].flatMap((command) =>
-      ["parent", "leaf", "human"].flatMap((format) =>
-        ["", "unrecognized-channel", 'beta"\nFORGED\u001b[31m'].map((channel) => ({
-          command,
-          target: command,
-          format,
-          channel,
-          channelLabel: JSON.stringify(channel),
-        })),
-      ),
-    ),
-    ...["parent", "human"].flatMap((format) =>
+it.each([
+  ...["repair", "finalize"].flatMap((command) =>
+    ["parent", "leaf", "human"].flatMap((format) =>
       ["", "unrecognized-channel", 'beta"\nFORGED\u001b[31m'].map((channel) => ({
-        command: undefined,
-        target: "update",
+        command,
+        target: command,
         format,
         channel,
         channelLabel: JSON.stringify(channel),
       })),
     ),
-  ],
-)(
+  ),
+  ...["parent", "human"].flatMap((format) =>
+    ["", "unrecognized-channel", 'beta"\nFORGED\u001b[31m'].map((channel) => ({
+      command: undefined,
+      target: "update",
+      format,
+      channel,
+      channelLabel: JSON.stringify(channel),
+    })),
+  ),
+])(
   "reports invalid $target channel $channelLabel in $format output",
   async ({ command, format, channel }) => {
     await withOpenClawTestState({ layout: "state-only" }, async (state) => {
@@ -48,7 +46,17 @@ it.each(
       });
       const message = `--channel must be "stable", "extended-stable", "beta", or "dev" (got ${JSON.stringify(channel)})`;
       expect(result, result.stderr).toMatchObject({ code: 1, signal: null });
-      expect(result.stderr.trim()).toBe(message);
+      // Top-level parent JSON errors cross run-main's stable diagnostic frame;
+      // repair/finalize JSON and human output leave the bare validation reason on stderr.
+      const expectedStderr =
+        command === undefined && format === "parent"
+          ? [
+              "[openclaw] The CLI command failed.",
+              `[openclaw] Reason: ${message}`,
+              "[openclaw] For help, run `openclaw doctor`.",
+            ].join("\n")
+          : message;
+      expect(result.stderr.trim()).toBe(expectedStderr);
       if (format === "human") {
         expect(result.stdout).toBe("");
       } else {
